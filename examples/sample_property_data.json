@@ -1,0 +1,51 @@
+{
+  "property_name": "オークラハイツ新宿",
+  "address": "東京都新宿区大久保2-15-3",
+  "nearest_station": {
+    "line": "JR山手線",
+    "station": "新大久保",
+    "walk_minutes": 5
+  },
+  "additional_stations": [
+    {"line": "東京メトロ副都心線", "station": "東新宿", "walk_minutes": 8}
+  ],
+  "rent_yen": 88000,
+  "management_fee_yen": 5000,
+  "layout": "1K",
+  "area_sqm": 23.5,
+  "building_age_years": 8,
+  "construction_year": 2018,
+  "structure": "RC",
+  "floor": 4,
+  "total_floors": 7,
+  "facing_direction": "南向き",
+  "rooms": [
+    {"name": "洋室", "size_jou": 8.0, "size_sqm": 13.2},
+    {"name": "キッチン", "size_jou": 2.5, "size_sqm": 4.1}
+  ],
+  "facilities": {
+    "air_conditioner": true,
+    "separate_bath_toilet": true,
+    "washing_machine_indoor": true,
+    "balcony": true,
+    "auto_lock": true,
+    "delivery_box": true,
+    "elevator": true,
+    "internet_free": true,
+    "gas_type": "都市ガス",
+    "kitchen_burners": 2,
+    "intercom_monitor": true,
+    "other_facilities": ["独立洗面台", "シューズボックス", "BS/CS"]
+  },
+  "conditions": {
+    "foreigners_ok": true,
+    "pets_ok": false,
+    "instruments_ok": false,
+    "corporate_contract_ok": true,
+    "office_use_ok": false,
+    "contract_period_years": 2
+  },
+  "available_from": "2026年6月1日",
+  "agency_notes": "新大久保駅徒歩5分。コリアンタウン至近で韓国人入居者多数。",
+  "extraction_confidence": "high"
+}
