@@ -178,7 +178,7 @@ with st.sidebar:
     st.divider()
     st.caption(
         f"💾 작업 완료 후 ZIP을 받으시면 다음 폴더에 저장하시는 것을 권장합니다:\n\n"
-        f"`G:\\내 드라이브\\0.사내공유\\1.부동산_공유\\블로그자동작성\\블로그작업`"
+        f"`G:\내 드라이브\0.사내공유\1.부동산_공유\1.안건\5.매물취합\블로그작성`"
     )
 
 
@@ -442,7 +442,7 @@ with tab3:
 
         # 전체 ZIP 다운로드 (G드라이브 저장용)
         target_folder = (
-            r"G:\내 드라이브\0.사내공유\1.부동산_공유\블로그자동작성\블로그작업"
+            r"G:\내 드라이브\0.사내공유\1.부동산_공유\1.안건\5.매물취합\블로그작성"
         )
         timestamp_label = datetime.now().strftime("%Y년%m월%d일 %H시%M분")
         timestamp_file = datetime.now().strftime("%Y%m%d_%H%M")
