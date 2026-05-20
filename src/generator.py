@@ -232,7 +232,6 @@ BLOG_GENERATION_PROMPT = """\
 • [장점 2]
 • [장점 3]
 
-💬 카카오톡: japanreal
 ```
 
 **작성 시 주의**:
