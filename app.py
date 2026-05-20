@@ -4,17 +4,26 @@ app.py
 JRE일본부동산 — 마이소크 → 네이버 블로그 자동 작성 시스템
 
 특징:
-- 한 번에 최대 5개 도면(마이소크) 업로드 → 블로그 5개 일괄 생성
+- 한 번에 최대 5개 도면(마이소크) 업로드 → 블로그 5개 일괄 생성 (병렬 처리)
 - JPG/PNG/WEBP/GIF/PDF 지원
-- 사무실 공용 비밀번호 인증 (작성자 이름 입력 없음)
+- 파일마다 글 스타일을 따로 선택 가능
+- 사무실 공용 비밀번호 인증 (작성자 이름 입력 없음, 새로고침해도 유지)
+- 카카오톡 요약 원클릭 복사
+- 생성된 블로그 전체 ZIP 다운로드 (G드라이브에 수동 저장)
 
 실행:
-- 로컬: streamlit run app.py  (.env 파일에서 설정 읽음)
-- 클라우드(Streamlit Community Cloud): Secrets에서 설정 읽음
+- 로컬: streamlit run app.py  (.env)
+- 클라우드: Streamlit Secrets
 """
 
+import hashlib
+import io
 import json
 import os
+import re
+import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
@@ -31,24 +40,18 @@ from src.generator import (
 from src.naver_publisher import NaverBlogClient
 
 # ─────────────────────────────────────────────────
-# 설정 로드 — 로컬과 클라우드 모두 지원
-#  · 로컬     : .env 파일 (load_dotenv)
-#  · 클라우드 : Streamlit Secrets → 환경변수로 연결
+# 설정 로드 (로컬 .env / 클라우드 Streamlit Secrets)
 # ─────────────────────────────────────────────────
-load_dotenv()  # 로컬 .env (클라우드에는 .env가 없으므로 무시됨)
-
+load_dotenv()
 try:
-    # Streamlit Cloud의 Secrets를 환경변수로 복사
-    # (setdefault 이므로 이미 설정된 .env 값이 우선)
     for _key in st.secrets:
         _val = st.secrets[_key]
         if isinstance(_val, str):
             os.environ.setdefault(_key, _val)
 except Exception:
-    # secrets.toml이 없으면(로컬 .env만 사용) 그냥 통과
     pass
 
-MAX_UPLOADS = 5  # 한 번에 처리할 수 있는 도면 최대 개수
+MAX_UPLOADS = 5
 
 st.set_page_config(
     page_title="🏠 JRE일본부동산 블로그 자동작성",
@@ -57,16 +60,34 @@ st.set_page_config(
 )
 
 
-# ────────────────────────────────────────────────
-# 사무실 공용 비밀번호 인증 (작성자 이름 입력 없음)
-# ────────────────────────────────────────────────
+# ─────────────────────────────────────────────────
+# 인증 — 새로고침 시에도 로그인 유지 (URL 토큰 사용)
+# ─────────────────────────────────────────────────
+def _auth_token() -> str:
+    """비밀번호로부터 인증 토큰을 만들어 URL에 보관 가능하게 함."""
+    pw = os.getenv("OFFICE_PASSWORD", "")
+    return hashlib.sha256(pw.encode("utf-8")).hexdigest()[:24]
+
+
 def _check_office_password() -> bool:
     office_pw = os.getenv("OFFICE_PASSWORD", "").strip()
     if not office_pw:
-        return True  # 비밀번호 미설정 → 인증 생략
-    if st.session_state.get("authenticated"):
         return True
 
+    expected = _auth_token()
+
+    # URL의 인증 토큰 확인 (새로고침 후 로그인 유지)
+    url_token = st.query_params.get("auth", "")
+    if url_token == expected:
+        st.session_state["authenticated"] = True
+        return True
+
+    if st.session_state.get("authenticated"):
+        # 세션엔 인증돼 있는데 URL 토큰 없으면 동기화
+        st.query_params["auth"] = expected
+        return True
+
+    # 로그인 화면
     st.title("🔐 JRE일본부동산 블로그 시스템")
     st.caption("사무실 비밀번호를 입력하세요.")
     with st.form("login_form"):
@@ -75,6 +96,7 @@ def _check_office_password() -> bool:
     if submitted:
         if password == office_pw:
             st.session_state["authenticated"] = True
+            st.query_params["auth"] = expected
             st.rerun()
         else:
             st.error("비밀번호가 틀렸습니다.")
@@ -87,16 +109,18 @@ if not _check_office_password():
 
 st.title("🏠 JRE일본부동산 — 네이버 블로그 자동작성 시스템")
 st.caption(
-    f"마이소크(物件図面) 최대 {MAX_UPLOADS}개 업로드 → "
-    "Claude Opus 4.7 분석 → 한국어 블로그 일괄 생성 → 네이버 발행"
+    f"마이소크 최대 {MAX_UPLOADS}개 업로드 → Claude AI 병렬 분석 → "
+    "한국어 블로그 일괄 생성"
 )
 
-# ────────────────────────────────────────────────
-# 사이드바 설정
-# ────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────
+# 사이드바
+# ─────────────────────────────────────────────────
 with st.sidebar:
     if os.getenv("OFFICE_PASSWORD", "").strip():
         if st.button("🚪 로그아웃", use_container_width=True):
+            st.query_params.clear()
             st.session_state.clear()
             st.rerun()
         st.divider()
@@ -108,49 +132,105 @@ with st.sidebar:
         options=list(VISA_LABELS.keys()),
         format_func=lambda k: VISA_LABELS[k],
         index=0,
-        help="블로그의 톤 참고용입니다. 추천 이유는 비자별로 나누지 않고 통합 작성됩니다.",
+        help="추천 이유는 비자별로 나누지 않고 통합 작성됩니다.",
     )
 
     available_styles = list_available_styles()
-    style_name = st.selectbox(
-        "📝 글 스타일",
+    default_style = st.selectbox(
+        "📝 기본 글 스타일",
         options=available_styles,
         index=0,
-        help="styles/ 폴더의 .md 파일로 톤·구조를 수정할 수 있습니다.",
+        help="2번 탭에서 매물마다 다른 스타일로 변경할 수 있습니다.",
     )
 
     st.divider()
-    st.subheader("AI 모델")
+    st.subheader("🔬 분석 엔진")
+    has_gemini = bool(os.getenv("GEMINI_API_KEY", "").strip())
+    engine_options = {
+        "hybrid": "🔀 하이브리드 (무료+Claude) ⭐ 추천",
+        "gemini": "🆓 Gemini 무료만",
+        "claude": "💎 Claude 유료만 (최고 정확도)",
+    }
+    engine = st.selectbox(
+        "분석 엔진 선택",
+        options=list(engine_options.keys()),
+        format_func=lambda k: engine_options[k],
+        index=0,
+        help=(
+            "하이브리드: Gemini 무료 시도 → 자신도 낮으면 Claude 자동 재시도. "
+            "GEMINI_API_KEY 미설정 시 자동으로 Claude만 사용."
+        ),
+    )
+    if engine in ("hybrid", "gemini") and not has_gemini:
+        st.warning(
+            "⚠️ GEMINI_API_KEY가 설정되지 않았습니다. "
+            "https://aistudio.google.com/apikey 에서 무료 발급 후 "
+            "환경변수에 추가하세요. 현재는 Claude만 사용됩니다."
+        )
+
+    st.subheader("AI 모델 (Claude)")
     model = st.selectbox(
-        "모델 선택",
+        "Claude 모델",
         ["claude-opus-4-7", "claude-sonnet-4-6"],
-        help="Opus 4.7은 정확도 최고, Sonnet 4.6은 더 빠르고 저렴",
+        help="하이브리드/Claude 모드에서 사용. Opus 4.7: 최고 정확도",
     )
 
-# ────────────────────────────────────────────────
+    st.divider()
+    st.caption(
+        f"💾 작업 완료 후 ZIP을 받으시면 다음 폴더에 저장하시는 것을 권장합니다:\n\n"
+        f"`G:\\내 드라이브\\0.사내공유\\1.부동산_공유\\블로그자동작성\\블로그작업`"
+    )
+
+
+# ─────────────────────────────────────────────────
+# 병렬 분석 워커
+# ─────────────────────────────────────────────────
+def _analyze_worker(file_bytes: bytes, suffix: str, engine: str, model: str) -> dict:
+    """ThreadPoolExecutor 워커: 임시 파일에 저장 후 분석, 자동 삭제."""
+    with NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(file_bytes)
+        tmp_path = tmp.name
+    try:
+        return analyze_property_sheet(tmp_path, engine=engine, model=model)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+
+def _generate_worker(property_data, target_visa, style_name, custom_instructions, model):
+    """ThreadPoolExecutor 워커: 블로그 생성."""
+    return generate_blog_post(
+        property_data=property_data,
+        target_visa=target_visa,
+        style_name=style_name,
+        custom_instructions=custom_instructions,
+        model=model,
+    )
+
+
+# ─────────────────────────────────────────────────
 # 4단계 탭
-# ────────────────────────────────────────────────
+# ─────────────────────────────────────────────────
 tab1, tab2, tab3, tab4 = st.tabs(
-    ["1️⃣ 도면 업로드", "2️⃣ 추출 결과", "3️⃣ 블로그 생성·미리보기", "4️⃣ 네이버 발행"]
+    ["1️⃣ 도면 업로드", "2️⃣ 추출 결과·스타일 선택", "3️⃣ 블로그 미리보기", "4️⃣ 네이버 발행"]
 )
 
-# ───── Tab 1: 업로드 (최대 5개) ─────
+# ───── Tab 1: 업로드 (병렬 분석) ─────
 with tab1:
     st.subheader(f"마이소크 (物件図面) 업로드 — 한 번에 최대 {MAX_UPLOADS}개")
-    st.caption("JPG · PNG · WEBP · GIF · PDF 형식 지원")
+    st.caption("지원 형식: JPG · PNG · WEBP · GIF · PDF")
 
     uploaded_files = st.file_uploader(
-        f"도면 파일을 최대 {MAX_UPLOADS}개까지 선택하세요 (한 번에 블로그 {MAX_UPLOADS}개 생성)",
+        f"도면 파일을 최대 {MAX_UPLOADS}개까지 선택하세요",
         type=["jpg", "jpeg", "png", "webp", "gif", "pdf"],
         accept_multiple_files=True,
     )
 
     if uploaded_files:
         if len(uploaded_files) > MAX_UPLOADS:
-            st.warning(
-                f"⚠️ 최대 {MAX_UPLOADS}개까지만 처리됩니다. "
-                f"앞의 {MAX_UPLOADS}개만 사용합니다."
-            )
+            st.warning(f"⚠️ 최대 {MAX_UPLOADS}개까지만 처리됩니다.")
             uploaded_files = uploaded_files[:MAX_UPLOADS]
 
         st.write(f"**업로드된 파일: {len(uploaded_files)}개**")
@@ -162,64 +242,86 @@ with tab1:
                 else:
                     st.image(uf, caption=uf.name, use_container_width=True)
 
-        if st.button("🔍 전체 도면 분석 시작", type="primary"):
+        if st.button("🔍 전체 도면 병렬 분석 시작", type="primary"):
             properties = []
-            progress = st.progress(0.0, text="분석 준비 중…")
             errors = []
+            progress = st.progress(0.0, text="병렬 분석 시작…")
 
-            for i, uf in enumerate(uploaded_files):
-                progress.progress(
-                    i / len(uploaded_files),
-                    text=f"[{i+1}/{len(uploaded_files)}] {uf.name} 분석 중…",
-                )
-                suffix = Path(uf.name).suffix
-                with NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                    tmp.write(uf.getvalue())
-                    tmp_path = tmp.name
-                try:
-                    data = analyze_property_sheet(tmp_path, model=model)
-                    properties.append({"filename": uf.name, "data": data})
-                except Exception as e:
-                    errors.append(f"{uf.name}: {e}")
-                finally:
-                    os.unlink(tmp_path)
+            # 파일 미리 읽기 (Streamlit UploadedFile은 thread-safe 안 함)
+            file_jobs = [
+                (uf.name, uf.getvalue(), Path(uf.name).suffix)
+                for uf in uploaded_files
+            ]
 
-            progress.progress(1.0, text="분석 완료")
+            with ThreadPoolExecutor(max_workers=MAX_UPLOADS) as executor:
+                future_to_name = {
+                    executor.submit(_analyze_worker, file_bytes, suffix, engine, model): name
+                    for name, file_bytes, suffix in file_jobs
+                }
+
+                done = 0
+                total = len(future_to_name)
+                for future in as_completed(future_to_name):
+                    name = future_to_name[future]
+                    try:
+                        data = future.result()
+                        properties.append({
+                            "filename": name,
+                            "data": data,
+                            "style": default_style,  # 기본 스타일
+                        })
+                    except Exception as e:
+                        errors.append(f"{name}: {e}")
+                    done += 1
+                    progress.progress(
+                        done / total,
+                        text=f"[{done}/{total}] 분석 완료",
+                    )
+
+            progress.progress(1.0, text="✅ 분석 완료")
+            # 업로드 순서대로 정렬 (병렬 완료 순서가 뒤죽박죽일 수 있음)
+            order = {name: i for i, (name, _, _) in enumerate(file_jobs)}
+            properties.sort(key=lambda p: order.get(p["filename"], 999))
 
             if properties:
                 st.session_state["properties"] = properties
-                st.session_state.pop("blog_posts", None)  # 이전 결과 초기화
+                st.session_state.pop("blog_posts", None)
                 st.success(
                     f"✅ {len(properties)}개 도면 분석 완료! 2번 탭에서 확인하세요."
                 )
             if errors:
                 st.error("일부 파일 분석 실패:\n" + "\n".join(errors))
 
-# ───── Tab 2: 추출 결과 검토 ─────
+# ───── Tab 2: 추출 결과 + 파일별 스타일 선택 ─────
 with tab2:
     properties = st.session_state.get("properties")
     if not properties:
         st.info("👈 먼저 1번 탭에서 도면을 업로드하고 분석을 실행하세요.")
     else:
         st.subheader(f"📋 추출 결과 — 총 {len(properties)}개")
-        st.caption("AI 추출 정보를 확인하고, 틀린 부분은 직접 수정하세요.")
+        st.caption(
+            "AI 추출 정보를 확인하고, 매물별로 글 스타일을 선택하세요. "
+            "틀린 정보는 직접 수정 가능합니다."
+        )
 
         for idx, prop in enumerate(properties):
             data = prop["data"]
             station = data.get("nearest_station") or {}
             with st.expander(
                 f"📄 {idx+1}. {prop['filename']}  —  "
-                f"{data.get('layout', '?')} / 월세 ¥{data.get('rent_yen', 0):,}",
+                f"{data.get('layout', '?')} / ¥{data.get('rent_yen', 0):,}",
                 expanded=(idx == 0),
             ):
-                col1, col2 = st.columns(2)
+                col1, col2, col3 = st.columns([2, 2, 1])
                 with col1:
-                    st.markdown(f"**물건명**: {data.get('property_name', '?')}")
-                    st.markdown(f"**주소**: {data.get('address', '?')}")
                     st.markdown(
-                        f"**최기 역**: {station.get('line', '?')} "
+                        f"**가장 가까운 역**: {station.get('line', '?')} "
                         f"{station.get('station', '?')}역 "
                         f"도보 {station.get('walk_minutes', '?')}분"
+                    )
+                    st.markdown(
+                        f"**방구조 / 전용면적**: {data.get('layout', '?')} "
+                        f"/ {data.get('area_sqm', '?')}㎡"
                     )
                 with col2:
                     mgmt = data.get("management_fee_yen") or 0
@@ -229,18 +331,37 @@ with tab2:
                         f"관리비 ¥{mgmt:,}",
                         delta_color="off",
                     )
-                    st.markdown(
-                        f"**평면도/면적**: {data.get('layout', '?')} "
-                        f"/ {data.get('area_sqm', '?')}㎡"
-                    )
-                    st.markdown(
-                        f"**추출 자신도**: {data.get('extraction_confidence', '?')}"
-                    )
+                with col3:
+                    conf = data.get("extraction_confidence", "?")
+                    if conf == "low":
+                        st.error(f"⚠️ 자신도: {conf}")
+                    elif conf == "medium":
+                        st.warning(f"자신도: {conf}")
+                    else:
+                        st.success(f"자신도: {conf}")
+                    engine_used = data.get("_engine_used", "?")
+                    if "gemini" in engine_used and "claude" not in engine_used:
+                        st.caption(f"🆓 {engine_used}")
+                    elif "폴백" in engine_used:
+                        st.caption(f"🔀 {engine_used}")
+                    else:
+                        st.caption(f"💎 {engine_used}")
+
+                # 이 매물의 스타일 선택 (파일별 다른 스타일 가능)
+                prop["style"] = st.selectbox(
+                    f"이 매물의 글 스타일",
+                    options=available_styles,
+                    index=available_styles.index(prop.get("style", default_style))
+                    if prop.get("style", default_style) in available_styles
+                    else 0,
+                    key=f"style_select_{idx}",
+                    help="매물마다 다른 스타일을 선택할 수 있습니다.",
+                )
 
                 edited = st.text_area(
-                    "추출 데이터 (필요시 수정)",
+                    "추출 데이터 (필요시 직접 수정)",
                     value=json.dumps(data, ensure_ascii=False, indent=2),
-                    height=260,
+                    height=240,
                     key=f"json_edit_{idx}",
                 )
                 try:
@@ -249,45 +370,59 @@ with tab2:
                     st.warning(f"⚠️ JSON 형식 오류: {e}")
 
         st.divider()
-        st.markdown("### ✍️ 블로그 글 일괄 생성")
-        st.caption(
-            f"선택 설정 → 스타일: **{style_name}** · 모델: **{model}** · "
-            f"비자(참고): **{VISA_LABELS.get(target_visa, '?')}**"
-        )
+        st.markdown("### ✍️ 블로그 글 일괄 생성 (병렬 처리)")
 
         custom_instructions = st.text_area(
             "전체 글 공통 특별 지시 (선택)",
             placeholder=(
-                "이번에 생성할 모든 글에 공통 적용할 지시. 예:\n"
-                "• 여성 손님 대상, 안전성(오토락 등) 강조\n"
+                "전체 글에 공통 적용할 지시. 예:\n"
+                "• 여성 손님 대상, 안전성 강조\n"
                 "• 한인 마트·한국 음식점 정보 비중 늘리기"
             ),
-            height=90,
+            height=80,
         )
 
+        # 스타일 요약 표시
+        style_summary = ", ".join(
+            f"{i+1}번: {p['style']}" for i, p in enumerate(properties)
+        )
+        st.caption(f"📝 선택된 스타일: {style_summary}")
+
         if st.button(f"✍️ 블로그 {len(properties)}개 일괄 생성", type="primary"):
-            blog_posts = []
-            progress = st.progress(0.0, text="생성 준비 중…")
+            blog_posts = [None] * len(properties)
             errors = []
+            progress = st.progress(0.0, text="병렬 생성 시작…")
 
-            for i, prop in enumerate(properties):
-                progress.progress(
-                    i / len(properties),
-                    text=f"[{i+1}/{len(properties)}] {prop['filename']} 블로그 작성 중…",
-                )
-                try:
-                    post = generate_blog_post(
-                        property_data=prop["data"],
-                        target_visa=target_visa,
-                        style_name=style_name,
-                        custom_instructions=custom_instructions,
-                        model=model,
+            with ThreadPoolExecutor(max_workers=MAX_UPLOADS) as executor:
+                future_to_idx = {
+                    executor.submit(
+                        _generate_worker,
+                        prop["data"],
+                        target_visa,
+                        prop["style"],
+                        custom_instructions,
+                        model,
+                    ): i
+                    for i, prop in enumerate(properties)
+                }
+
+                done = 0
+                total = len(future_to_idx)
+                for future in as_completed(future_to_idx):
+                    i = future_to_idx[future]
+                    name = properties[i]["filename"]
+                    try:
+                        post = future.result()
+                        blog_posts[i] = {"filename": name, "post": post}
+                    except Exception as e:
+                        errors.append(f"{name}: {e}")
+                    done += 1
+                    progress.progress(
+                        done / total, text=f"[{done}/{total}] 생성 완료"
                     )
-                    blog_posts.append({"filename": prop["filename"], "post": post})
-                except Exception as e:
-                    errors.append(f"{prop['filename']}: {e}")
 
-            progress.progress(1.0, text="생성 완료")
+            progress.progress(1.0, text="✅ 생성 완료")
+            blog_posts = [bp for bp in blog_posts if bp]
 
             if blog_posts:
                 st.session_state["blog_posts"] = blog_posts
@@ -305,27 +440,106 @@ with tab3:
     else:
         st.subheader(f"📝 생성된 블로그 — 총 {len(blog_posts)}개")
 
+        # 전체 ZIP 다운로드 (G드라이브 저장용)
+        target_folder = (
+            r"G:\내 드라이브\0.사내공유\1.부동산_공유\블로그자동작성\블로그작업"
+        )
+        timestamp_label = datetime.now().strftime("%Y년%m월%d일 %H시%M분")
+        timestamp_file = datetime.now().strftime("%Y%m%d_%H%M")
+
+        zip_buf = io.BytesIO()
+        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for idx, bp in enumerate(blog_posts):
+                post = bp["post"]
+                stem = Path(bp["filename"]).stem
+                html = build_naver_smarteditor_html(post)
+                zf.writestr(f"{timestamp_file}_{idx+1:02d}_{stem}.html", html)
+                zf.writestr(
+                    f"{timestamp_file}_{idx+1:02d}_{stem}.json",
+                    json.dumps(post, ensure_ascii=False, indent=2),
+                )
+        zip_buf.seek(0)
+
+        # 큰 안내 박스
+        st.markdown(
+            f"""
+            <div style="background:#e3f2fd;border-left:5px solid #1976d2;
+                        padding:14px 18px;border-radius:6px;margin:12px 0">
+                <div style="font-size:15px;font-weight:600;color:#0d47a1;
+                            margin-bottom:6px">
+                    💾 작업 결과 저장 안내 ({timestamp_label} 작업분 — {len(blog_posts)}개)
+                </div>
+                <div style="font-size:13px;color:#1a1a2e;line-height:1.7">
+                    아래 <b>ZIP 다운로드 버튼</b>을 누르면 압축 파일이 생성됩니다.<br>
+                    다운로드 창에서 <b>저장 위치를 다음 폴더로 지정</b>하세요:
+                </div>
+                <div style="background:#fff;border:1px solid #bbdefb;
+                            padding:8px 12px;border-radius:4px;margin-top:8px;
+                            font-family:'Courier New',monospace;font-size:12px;
+                            color:#0d47a1;word-break:break-all">
+                    {target_folder}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        col_a, col_b = st.columns([1, 1])
+        with col_a:
+            # 경로 한 줄 → 우측 📋 아이콘으로 클립보드 복사
+            st.markdown("**📋 저장 경로 (우측 아이콘 클릭하면 복사됨)**")
+            st.code(target_folder, language=None)
+        with col_b:
+            st.markdown("**📦 ZIP 다운로드**")
+            st.download_button(
+                f"📦 ZIP 다운로드 ({len(blog_posts)}개 블로그)",
+                zip_buf.getvalue(),
+                file_name=f"블로그_{timestamp_file}.zip",
+                mime="application/zip",
+                type="primary",
+                use_container_width=True,
+            )
+
+        with st.expander("💡 매번 자동으로 G드라이브 폴더에 저장되게 하는 방법"):
+            st.markdown(
+                f"""
+                **Chrome 다운로드 위치를 G드라이브 폴더로 설정하면 매번 자동 저장됩니다.**
+
+                1. Chrome 우측 위 **⋮ → 설정**
+                2. 왼쪽 메뉴 **다운로드**
+                3. **"위치"** 옆 **"변경"** 클릭
+                4. 다음 폴더 선택:
+                   ```
+                   {target_folder}
+                   ```
+                5. **"다운로드 전에 각 파일의 저장 위치 확인"** → 꺼두기
+
+                > ⚠️ 이 설정 후에는 다른 곳에서 받는 파일도 이 폴더로 갑니다.
+                > 매번 위치를 묻게 하려면 5번을 켜두세요. (그래도 시작 위치가
+                > G드라이브 폴더라 매번 클릭 두세 번이면 끝납니다.)
+                """
+            )
+
+        st.divider()
+
         for idx, bp in enumerate(blog_posts):
             post = bp["post"]
             with st.expander(
                 f"📝 {idx+1}. {post.get('title', bp['filename'])}",
                 expanded=(idx == 0),
             ):
-                st.text_input(
-                    "제목", value=post.get("title", ""), key=f"title_{idx}"
-                )
-                st.text_area(
-                    "카카오톡용 요약",
-                    value=post.get("summary_for_chat", ""),
-                    height=70,
-                    key=f"summary_{idx}",
-                )
+                st.text_input("제목", value=post.get("title", ""), key=f"title_{idx}")
+
+                # ⭐ 카카오톡용 요약 + 복사 버튼 (st.code의 내장 복사 아이콘 사용)
+                st.markdown("**📱 카카오톡용 요약** (우측 상단 📋 아이콘 클릭하면 복사)")
+                st.code(post.get("summary_for_chat", ""), language=None, wrap_lines=True)
 
                 st.markdown("**미리보기**")
+                st.caption("🚨 빨간색 배경의 '⚠️ 현지 확인 필요' 부분은 직접 채워 넣으세요")
                 st.markdown(post.get("html_content", ""), unsafe_allow_html=True)
 
                 st.markdown("**해시태그**")
-                st.code(" ".join(post.get("hashtags", [])))
+                st.code(" ".join(post.get("hashtags", [])), language=None)
 
                 c1, c2 = st.columns(2)
                 with c1:
@@ -355,12 +569,15 @@ with tab4:
 
     st.warning(
         "⚠️ 사전 준비: 네이버 개발자센터 앱 등록 + '네이버 아이디로 로그인' 심사 통과 "
-        "+ .env에 NAVER_CLIENT_ID/SECRET 설정"
+        "+ 환경변수에 NAVER_CLIENT_ID/SECRET 설정"
     )
 
     if not (os.getenv("NAVER_CLIENT_ID") and os.getenv("NAVER_CLIENT_SECRET")):
         st.error("네이버 환경변수가 설정되지 않았습니다.")
-        st.info("💡 3번 탭에서 HTML을 다운로드해 네이버 블로그 글쓰기에 붙여넣으면 즉시 발행 가능합니다.")
+        st.info(
+            "💡 3번 탭의 HTML 다운로드를 네이버 블로그 글쓰기 'HTML 편집' 모드에 "
+            "붙여넣어 발행하시는 것이 가장 안정적입니다."
+        )
         st.stop()
 
     try:
@@ -396,7 +613,7 @@ with tab4:
             if st.button("🚀 발행", key=f"publish_{idx}"):
                 with st.spinner("네이버에 발행 중…"):
                     try:
-                        result = client.write_post(
+                        client.write_post(
                             title=post.get("title", ""),
                             contents=post.get("html_content", ""),
                             tags=post.get("hashtags", []),
