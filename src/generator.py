@@ -232,7 +232,7 @@ BLOG_GENERATION_PROMPT = """\
 • [장점 2]
 • [장점 3]
 
-💬 카카오톡: japanreal2
+💬 카카오톡: japanreal
 ```
 
 **작성 시 주의**:
@@ -388,7 +388,7 @@ def generate_blog_post(
         style_instructions=style_instructions,
         custom_instructions=custom_block,
         property_json=json.dumps(prop, ensure_ascii=False, indent=2),
-        kakao=os.getenv("KAKAO_TALK_ID", "japanreal2"),
+        kakao=os.getenv("KAKAO_TALK_ID", "japanreal"),
         phone=os.getenv("COMPANY_PHONE", "070-8201-5740"),
         core_hashtags=" ".join(CORE_HASHTAGS),
     )
