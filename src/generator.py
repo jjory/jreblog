@@ -126,17 +126,27 @@ BLOG_GENERATION_PROMPT = """\
 {{
   "title": "네이버 블로그 SEO 최적화 제목 (35자 이내, 지역·역·방구조·월세 포함, 단 매물명·주소는 제외)",
   "meta_description": "검색 노출용 첫 문단 (150자 이내)",
-  "html_content": "SmartEditor 호환 HTML 본문 (h2/h3/p/ul/li/table/strong 태그만 사용. div/style/class 금지)",
+  "html_content": "SmartEditor 호환 HTML 본문 (h2/h3/p/ul/li/table/tr/td/strong 태그만 사용. div/class 금지. table에는 inline style 필수)",
   "hashtags": ["#태그1", "#태그2", ...],
-  "summary_for_chat": "카카오톡으로 보낼 3~4줄 요약. 매물 기본정보 + 추천 이유를 조합. 매물명·주소는 제외."
+  "summary_for_chat": "카카오톡용 요약. 항목별 이모지+줄바꿈 형식 (서술형 금지). 형식은 아래 [카카오톡 요약 규칙] 참고"
 }}
 
-# html_content 구성 가이드 (이 순서대로, 각 섹션 사이 빈 줄)
+# html_content 구성 가이드 (이 순서 그대로, 각 섹션 사이 빈 줄)
 
-1. 인사말 + 한 줄 매물 소개 (매물명·주소 언급 금지)
+⭐ **섹션 헤더는 반드시 다음 이모지 그대로 사용** (스타일 가이드와 무관하게 고정):
+   - <h2>📋 매물 기본정보</h2>
+   - <h2>🏠 방 구조와 설비</h2>
+   - <h2>📍 위치와 생활 인프라</h2>
+   - <h2>✨ 추천 이유</h2>
+   - <h2>💬 상담 신청</h2>
 
-2. <h2>매물 기본정보</h2>
-   ⭐ **반드시 다음 8개 항목을 표로** (이 순서 그대로, 추가·삭제 금지):
+1. **인사말 + 한 줄 매물 소개** (매물명·주소 언급 금지)
+
+2. **<h2>📋 매물 기본정보</h2>**
+   ⚠️ **헤더 바로 다음에 표만 작성. 표 앞에 어떤 설명 문단도 절대 넣지 말 것**
+   (스타일에 따라 "이 매물은 ...입니다" 같은 인트로 문장 추가 금지)
+
+   반드시 다음 8개 항목을 표로 (이 순서 그대로, 추가·삭제 금지):
 
    | 항목 | 표기 예시 |
    |------|-----------|
@@ -149,21 +159,37 @@ BLOG_GENERATION_PROMPT = """\
    | 건축년도 | 2018년 |
    | 입주가능일 | 2026년 6월 1일 |
 
-   - 데이터에 없는 항목은 셀에 "(현지 확인 필요)"로 표기
+   ⭐ **표 HTML 형식 — 네이버 SmartEditor에서 표가 사라지지 않도록 다음 inline style 필수**:
+
+   ```html
+   <table style="border-collapse:collapse;width:100%;border:1px solid #ddd">
+     <tr>
+       <td style="border:1px solid #ddd;padding:8px 12px;background:#f5f5f5;width:30%;font-weight:bold">가장 가까운 역</td>
+       <td style="border:1px solid #ddd;padding:8px 12px">JR 야마노테선 신오쿠보역 도보 5분</td>
+     </tr>
+     <tr>
+       <td style="border:1px solid #ddd;padding:8px 12px;background:#f5f5f5;font-weight:bold">방구조</td>
+       <td style="border:1px solid #ddd;padding:8px 12px">1K</td>
+     </tr>
+     ...8개 행 모두...
+   </table>
+   ```
+
+   - 데이터에 없는 항목은 셀 값에 "(현지 확인 필요)"로 표기
    - 매물명·주소·계약기간은 이 표에 절대 넣지 마세요
 
-3. <h2>방 구조와 설비</h2> — 방 구성, 에어컨·욕실·세탁기 등 설비
+3. **<h2>🏠 방 구조와 설비</h2>** — 방 구성, 에어컨·욕실·세탁기 등 설비
 
-4. <h2>위치와 생활 인프라</h2> — 교통, 주변 편의시설, 가능하면 한인 마트·한국 음식점
+4. **<h2>📍 위치와 생활 인프라</h2>** — 교통, 주변 편의시설, 가능하면 한인 마트·한국 음식점
 
-5. <h2>추천 이유</h2>
+5. **<h2>✨ 추천 이유</h2>**
    - 비자 종류별로 나누지 말고 매물 장점을 통합해서 작성
    - 누구에게나 와닿는 알기 쉬운 장점 3~5개, 중복 없이
    - 예: 역세권, 채광, 한인타운 접근성, 욕실분리 등
    - 매물 데이터에서 실제 확인되는 강점만 사용
    - "신축"은 건축 5년 이내일 때만 (작성 원칙 5번 준수)
 
-6. <h2>상담 신청</h2> — 아래 [상담 신청 작성 규칙]을 그대로 반영
+6. **<h2>💬 상담 신청</h2>** — 아래 [상담 신청 작성 규칙]을 그대로 반영
 
 # [상담 신청 작성 규칙] — ⭐ 스타일 가이드 무관, 항상 다음 톤 고정
 **톤**: 믿고 맡길 수 있는 신뢰감 있는 전문가형
@@ -188,13 +214,33 @@ BLOG_GENERATION_PROMPT = """\
   관련 태그를 5개 이내로 더하세요. 전체 20개 이내.
 - 필수 태그: {core_hashtags}
 
-# 카카오톡 요약 (summary_for_chat) 규칙
-- 3~4줄, 매물 기본정보(역·방구조·면적·월세)와 추천 이유 핵심을 조합
-- 매물명·주소는 제외, 손님이 한눈에 매력 포인트를 파악할 수 있게
-- 예시 형식:
-  "JR 야마노테선 신오쿠보역 도보 5분, 1K 23.5㎡, 월세 ¥88,000입니다.
-   2018년 건축 남향 매물로 채광 좋고, 한인타운 도보권에 욕실분리·오토락까지 갖췄습니다.
-   자세한 자료가 필요하시면 카카오톡(japanreal2)으로 연락 주세요."
+# [카카오톡 요약 (summary_for_chat) 규칙] — ⭐ 줄글 금지, 항목별 이모지 형식 고정
+
+서술형(줄글)로 쓰지 말고, **다음과 같이 항목별 이모지 + 한 줄씩 작성**해서 카카오톡에서
+한눈에 읽기 쉽게 만드세요. 줄바꿈은 \\n 사용.
+
+**필수 형식** (이 구조 그대로):
+
+```
+🚉 [노선명] [역명]역 도보 [N]분
+🏠 [방구조] / [면적]㎡
+💴 월세 ¥[금액] + 관리비 ¥[금액]
+🗓 [건축년도] / [방향]
+
+✨ 추천 포인트
+• [장점 1]
+• [장점 2]
+• [장점 3]
+
+💬 카카오톡: japanreal2
+```
+
+**작성 시 주의**:
+- 데이터에 없는 항목 줄은 통째로 생략 (예: 방향 미상이면 🗓 줄에서 방향 부분 생략)
+- 추천 포인트는 2~4개, 매물의 실제 강점만 (광고 문구 X)
+- 매물명·주소·계약기간은 절대 포함하지 말 것
+- 첫 줄에 인사말이나 광고성 문구 넣지 말 것 (바로 정보부터 시작)
+- 마지막 줄은 카카오톡 ID 안내로 고정
 
 각 섹션은 정보 위주로 간결하게. 광고 문구만 채우지 말 것.
 """
@@ -239,6 +285,46 @@ def _highlight_check_needed(html: str) -> str:
         '⚠️ 현지 확인 필요</strong>'
     )
     return pattern.sub(replacement, html)
+
+
+def _ensure_table_styles(html: str) -> str:
+    """
+    표(table/tr/td)에 inline style이 빠져 있으면 자동으로 채워 넣음.
+    네이버 SmartEditor가 style 없는 단순 table을 무시·축소하는 문제 방지.
+    AI가 가끔 빈 <table>을 만들 때 대비한 안전망.
+    """
+    # <table>에 style이 없으면 기본 style 주입
+    def _inject_table(m):
+        attrs = m.group(1) or ""
+        if "style=" in attrs:
+            return m.group(0)
+        return (
+            '<table style="border-collapse:collapse;width:100%;'
+            'border:1px solid #ddd;margin:10px 0"' + attrs + '>'
+        )
+    html = re.sub(r"<table([^>]*)>", _inject_table, html)
+
+    # <td>에 style이 없으면 기본 style 주입 (좌측 셀과 우측 셀 구분은 어렵지만
+    # 일단 border와 padding이라도 보장)
+    def _inject_td(m):
+        attrs = m.group(1) or ""
+        if "style=" in attrs:
+            return m.group(0)
+        return '<td style="border:1px solid #ddd;padding:8px 12px"' + attrs + '>'
+    html = re.sub(r"<td([^>]*)>", _inject_td, html)
+
+    # <th>도 동일 처리
+    def _inject_th(m):
+        attrs = m.group(1) or ""
+        if "style=" in attrs:
+            return m.group(0)
+        return (
+            '<th style="border:1px solid #ddd;padding:8px 12px;'
+            'background:#f5f5f5;font-weight:bold;text-align:left"' + attrs + '>'
+        )
+    html = re.sub(r"<th([^>]*)>", _inject_th, html)
+
+    return html
 
 
 def generate_blog_post(
@@ -334,6 +420,7 @@ def generate_blog_post(
 
             # "(현지 확인 필요)" 표시를 빨간색으로 강조 (수동 편집 필요한 부분 시각화)
             if result.get("html_content"):
+                result["html_content"] = _ensure_table_styles(result["html_content"])
                 result["html_content"] = _highlight_check_needed(result["html_content"])
 
             result["_meta"] = {
