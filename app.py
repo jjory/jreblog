@@ -59,6 +59,14 @@ st.set_page_config(
     layout="wide",
 )
 
+# ─────────────────────────────────────────────────
+# 📁 생성된 블로그 ZIP을 저장할 권장 폴더 경로
+#     변경하려면 아래 한 줄만 바꾸세요.
+# ─────────────────────────────────────────────────
+OUTPUT_FOLDER_PATH = (
+    r"G:\내 드라이브\0.사내공유\1.부동산_공유\1.안건\5.매물취합\블로그작성"
+)
+
 
 # ─────────────────────────────────────────────────
 # 인증 — 새로고침 시에도 로그인 유지 (URL 토큰 사용)
@@ -177,8 +185,15 @@ with st.sidebar:
 
     st.divider()
     st.caption(
+        "👥 **동시 접속 지원**\n\n"
+        "여러 직원이 동시에 접속해도 각자의 작업이 분리됩니다. "
+        "다른 분의 업로드·결과를 침범하지 않으니 안심하고 사용하세요."
+    )
+
+    st.divider()
+    st.caption(
         f"💾 작업 완료 후 ZIP을 받으시면 다음 폴더에 저장하시는 것을 권장합니다:\n\n"
-        f"`G:\내 드라이브\0.사내공유\1.부동산_공유\1.안건\5.매물취합\블로그작성`"
+        f"`{OUTPUT_FOLDER_PATH}`"
     )
 
 
@@ -441,9 +456,7 @@ with tab3:
         st.subheader(f"📝 생성된 블로그 — 총 {len(blog_posts)}개")
 
         # 전체 ZIP 다운로드 (G드라이브 저장용)
-        target_folder = (
-            r"G:\내 드라이브\0.사내공유\1.부동산_공유\1.안건\5.매물취합\블로그작성"
-        )
+        target_folder = OUTPUT_FOLDER_PATH
         timestamp_label = datetime.now().strftime("%Y년%m월%d일 %H시%M분")
         timestamp_file = datetime.now().strftime("%Y%m%d_%H%M")
 
