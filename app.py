@@ -1341,10 +1341,11 @@ with tab6:
                         unsafe_allow_html=True,
                     )
 
-                # 카톡 요약 표시
+                # 카톡 요약 표시 (접힘 상태가 기본)
                 summary = h.get("summary_for_chat", "")
                 if summary:
-                    st.code(summary, language=None, wrap_lines=True)
+                    with st.expander("📱 카카오톡용 요약 보기", expanded=False):
+                        st.code(summary, language=None, wrap_lines=True)
 
                 # 추가 작업: 본문 + 다운로드 (펼침)
                 with st.expander("📄 본문 HTML + 해시태그 + 다운로드", expanded=False):
