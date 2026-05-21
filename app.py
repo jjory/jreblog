@@ -30,7 +30,7 @@ from tempfile import NamedTemporaryFile
 import streamlit as st
 from dotenv import load_dotenv
 
-from src.analyzer import analyze_property_sheet
+from src.analyzer import analyze_property_sheet, format_error_korean
 from src.generator import (
     VISA_LABELS,
     build_naver_smarteditor_html,
@@ -52,6 +52,15 @@ except Exception:
     pass
 
 MAX_UPLOADS = 5
+
+# ─────────────────────────────────────────────────
+# 동시 병렬 처리 워커 수
+# ─────────────────────────────────────────────────
+# 5에서 3으로 감소 — Streamlit Cloud 무료 플랜(RAM 1GB) 안정성 향상.
+# - 단일 사용자: 5파일을 3+2 배치로 처리 (약 1.5배 시간)
+# - 3대 동시 사용: 3 × 3 = 9개 동시 처리 (이전 15개 → 안정)
+# 한 명이 절대적 속도가 필요하면 5로 늘릴 수 있으나, 다중 사용자 안정성 우선.
+MAX_PARALLEL_WORKERS = 3
 
 st.set_page_config(
     page_title="🏠 JRE일본부동산 블로그 자동작성",
@@ -185,9 +194,12 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "👥 **동시 접속 지원**\n\n"
-        "여러 직원이 동시에 접속해도 각자의 작업이 분리됩니다. "
-        "다른 분의 업로드·결과를 침범하지 않으니 안심하고 사용하세요."
+        "👥 **동시 접속 사용 안내**\n\n"
+        "여러 직원이 동시에 접속해도 각자의 작업이 분리됩니다.\n\n"
+        "⚠️ **단, 같은 시각에 분석을 동시 실행하면 메모리 부족으로 "
+        "에러가 날 수 있습니다.** 가능하면:\n"
+        "- 다른 직원이 분석 중일 때는 잠시 기다리기\n"
+        "- 또는 5~10분 간격을 두고 사용하기"
     )
 
     st.divider()
@@ -268,7 +280,7 @@ with tab1:
                 for uf in uploaded_files
             ]
 
-            with ThreadPoolExecutor(max_workers=MAX_UPLOADS) as executor:
+            with ThreadPoolExecutor(max_workers=MAX_PARALLEL_WORKERS) as executor:
                 future_to_name = {
                     executor.submit(_analyze_worker, file_bytes, suffix, engine, model): name
                     for name, file_bytes, suffix in file_jobs
@@ -286,7 +298,7 @@ with tab1:
                             "style": default_style,  # 기본 스타일
                         })
                     except Exception as e:
-                        errors.append(f"{name}: {e}")
+                        errors.append(format_error_korean(e, name))
                     done += 1
                     progress.progress(
                         done / total,
@@ -305,7 +317,9 @@ with tab1:
                     f"✅ {len(properties)}개 도면 분석 완료! 2번 탭에서 확인하세요."
                 )
             if errors:
-                st.error("일부 파일 분석 실패:\n" + "\n".join(errors))
+                st.error("⚠️ 일부 파일 분석 실패")
+                for err_msg in errors:
+                    st.markdown(err_msg)
 
 # ───── Tab 2: 추출 결과 + 파일별 스타일 선택 ─────
 with tab2:
@@ -408,7 +422,7 @@ with tab2:
             errors = []
             progress = st.progress(0.0, text="병렬 생성 시작…")
 
-            with ThreadPoolExecutor(max_workers=MAX_UPLOADS) as executor:
+            with ThreadPoolExecutor(max_workers=MAX_PARALLEL_WORKERS) as executor:
                 future_to_idx = {
                     executor.submit(
                         _generate_worker,
@@ -430,7 +444,7 @@ with tab2:
                         post = future.result()
                         blog_posts[i] = {"filename": name, "post": post}
                     except Exception as e:
-                        errors.append(f"{name}: {e}")
+                        errors.append(format_error_korean(e, name))
                     done += 1
                     progress.progress(
                         done / total, text=f"[{done}/{total}] 생성 완료"
@@ -445,7 +459,9 @@ with tab2:
                     f"✅ 블로그 {len(blog_posts)}개 생성 완료! 3번 탭에서 확인하세요."
                 )
             if errors:
-                st.error("일부 글 생성 실패:\n" + "\n".join(errors))
+                st.error("⚠️ 일부 블로그 생성 실패")
+                for err_msg in errors:
+                    st.markdown(err_msg)
 
 # ───── Tab 3: 블로그 미리보기 ─────
 with tab3:
