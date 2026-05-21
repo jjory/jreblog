@@ -512,3 +512,234 @@ def build_naver_smarteditor_html(blog_post: dict) -> str:
 <p><br/></p>
 <p>{hashtags}</p>
 """
+
+
+# ─────────────────────────────────────────────────
+# SNS 콘텐츠 자동 생성 (인스타·카톡·유튜브 쇼츠)
+# ─────────────────────────────────────────────────
+SNS_PROMPT = """\
+당신은 한국인 일본 거주 손님을 대상으로 하는 일본 부동산 SNS 마케팅 전문가입니다.
+아래 매물 정보와 블로그 글을 바탕으로, 세 가지 채널용 콘텐츠를 작성하세요.
+
+# 매물 정보 (JSON)
+{property_json}
+
+# 이미 생성된 블로그 정보
+- 제목: {blog_title}
+- 카톡 요약:
+{summary_for_chat}
+
+# 출력 (JSON only, 코드블럭 없이):
+
+{{
+  "instagram_caption": "<인스타 피드 캡션, 200~300자, 한국어, 손님 친화 톤>",
+  "instagram_hashtags": ["#태그1", "#태그2", ...],
+  "kakao_openchat": "<카카오톡 오픈채팅방 메시지, 100~150자, 이모지 활용, 핵심 정보만>",
+  "youtube_shorts_script": {{
+    "hook": "<0~3초 강력한 도입 문구, 한 줄>",
+    "scenes": [
+      {{
+        "time": "0~10s",
+        "subtitle": "<자막 텍스트, 한 줄>",
+        "narration": "<나레이션 또는 강조 포인트>"
+      }},
+      {{ "time": "10~25s", "subtitle": "...", "narration": "..." }},
+      {{ "time": "25~45s", "subtitle": "...", "narration": "..." }},
+      {{ "time": "45~55s", "subtitle": "...", "narration": "..." }}
+    ],
+    "cta": "<55~60초 콜투액션, 카톡 ID japanreal2 연결 유도>"
+  }}
+}}
+
+# 작성 규칙
+
+## 인스타그램 캡션 (instagram_caption)
+- 첫 줄: 매물 한 줄 요약 (이모지 1~2개 + 핵심 포인트)
+- 본문: 매물 장점 2~3개를 감성적으로 (광고 X, 정보 위주)
+- 손님이 공감할 만한 일상 톤
+- 매물명·정확한 주소·계약기간은 절대 포함 X
+- "DM 또는 카톡 japanreal2" 같은 자연스러운 콜투액션 1줄
+- 글머리 기호(•) 사용 OK, 짧은 줄바꿈 활용
+- 200~300자
+
+## 인스타그램 해시태그 (instagram_hashtags)
+- 8~12개
+- 일본 부동산·도쿄·해당 지역·생활 정보 관련
+- 인기 태그 + 롱테일 태그 혼합
+- 예: #일본부동산 #도쿄월세 #신주쿠원룸 #일본워홀 #도쿄집구하기
+
+## 카카오톡 오픈채팅 (kakao_openchat)
+- 첫 줄: 강력한 이모지 + 매물 한 줄 요약
+- 정보 3~4줄 (역·월세·방구조·핵심포인트 1개)
+- 마지막 줄: 문의 안내 (간결)
+- 광고 톤 X, 정보 공유 톤
+- 100~150자, 이모지 적극 활용
+- 줄바꿈 \\n 사용
+
+## 유튜브 쇼츠 스크립트 (youtube_shorts_script)
+- 총 60초 분량
+- hook: 첫 3초 시청자 사로잡기 (예: "도쿄 신주쿠 5분 거리 매물!")
+- 4개 장면(scenes): 시간 배분 자연스럽게
+- 각 장면의 subtitle: 화면에 띄울 짧은 자막 (10~15자)
+- 각 장면의 narration: 음성 또는 강조 텍스트 (20~30자)
+- cta: 카카오톡 ID japanreal2 자연스럽게 안내
+
+# 공통 주의사항
+- 한국어로 작성
+- 매물명·정확한 주소·계약기간은 절대 포함 X
+- 광고성 강조 문구 X (예: "최고", "절대 강추")
+- 정보의 신뢰성 강조 (정직한 톤)
+- 추측 정보는 "(현지 확인 필요)" 표시
+
+JSON 출력만, 다른 설명 텍스트 절대 X.
+"""
+
+
+def generate_sns_content(
+    property_data: dict,
+    blog_post: dict,
+    model: str = DEFAULT_MODEL,
+    api_key: Optional[str] = None,
+    max_retries: int = 3,
+) -> dict:
+    """
+    매물 정보 + 블로그를 바탕으로 SNS 콘텐츠 3종 자동 생성.
+
+    Args:
+        property_data: analyzer.py가 추출한 매물 데이터 (dict)
+        blog_post: generate_blog_post() 결과 (dict, title/summary_for_chat 포함)
+        model: Claude 모델
+        api_key: Anthropic API 키
+        max_retries: 재시도 횟수
+
+    Returns:
+        {
+            "instagram_caption": "...",
+            "instagram_hashtags": ["#...", ...],
+            "kakao_openchat": "...",
+            "youtube_shorts_script": {
+                "hook": "...",
+                "scenes": [...],
+                "cta": "..."
+            }
+        }
+    """
+    api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "ANTHROPIC_API_KEY 가 설정되지 않았습니다."
+        )
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    # 프롬프트 변수 채우기
+    property_json = json.dumps(property_data, ensure_ascii=False, indent=2)
+    blog_title = blog_post.get("title", "")
+    summary_for_chat = blog_post.get("summary_for_chat", "")
+
+    prompt = SNS_PROMPT.format(
+        property_json=property_json,
+        blog_title=blog_title,
+        summary_for_chat=summary_for_chat,
+    )
+
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            response = client.messages.create(
+                model=model,
+                max_tokens=2000,
+                messages=[{"role": "user", "content": prompt}],
+            )
+
+            raw_text = response.content[0].text.strip()
+            result = _extract_blog_json(raw_text)
+
+            # 필수 필드 검증
+            required = [
+                "instagram_caption", "instagram_hashtags",
+                "kakao_openchat", "youtube_shorts_script"
+            ]
+            for k in required:
+                if k not in result:
+                    raise KeyError(f"필수 필드 누락: {k}")
+
+            return result
+
+        except (json.JSONDecodeError, ValueError, KeyError, IndexError) as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+                continue
+            raise
+
+    raise RuntimeError(
+        f"SNS 콘텐츠 생성 실패 (재시도 {max_retries}회 초과): {last_error}"
+    )
+
+
+def format_sns_for_display(sns_content: dict) -> dict:
+    """
+    SNS 콘텐츠를 화면 표시·복사용 텍스트로 포맷팅.
+    각 채널별로 사용자가 그대로 복사해서 사용할 수 있는 형태.
+
+    Returns:
+        {
+            "instagram_full": "캡션\\n\\n해시태그",
+            "kakao": "메시지",
+            "youtube_full": "Hook + 시간별 장면 + CTA",
+            "youtube_subtitles_only": "자막만 (영상 편집용)"
+        }
+    """
+    insta_caption = sns_content.get("instagram_caption", "")
+    insta_tags = sns_content.get("instagram_hashtags", [])
+    instagram_full = (
+        insta_caption + "\n\n" + " ".join(insta_tags)
+    ).strip()
+
+    kakao = sns_content.get("kakao_openchat", "")
+
+    shorts = sns_content.get("youtube_shorts_script", {})
+    hook = shorts.get("hook", "")
+    scenes = shorts.get("scenes", [])
+    cta = shorts.get("cta", "")
+
+    # 유튜브 쇼츠 전체 스크립트 (사용자 보기용)
+    youtube_lines = []
+    if hook:
+        youtube_lines.append(f"🎬 [0~3초 Hook]")
+        youtube_lines.append(f"   {hook}")
+        youtube_lines.append("")
+    for i, scene in enumerate(scenes, 1):
+        time_label = scene.get("time", "")
+        subtitle = scene.get("subtitle", "")
+        narration = scene.get("narration", "")
+        youtube_lines.append(f"📋 [장면 {i} · {time_label}]")
+        youtube_lines.append(f"   자막: {subtitle}")
+        if narration and narration != subtitle:
+            youtube_lines.append(f"   나레이션: {narration}")
+        youtube_lines.append("")
+    if cta:
+        youtube_lines.append(f"📢 [CTA · 55~60초]")
+        youtube_lines.append(f"   {cta}")
+
+    youtube_full = "\n".join(youtube_lines)
+
+    # 자막만 (영상 편집 시 그대로 사용)
+    subtitle_lines = []
+    if hook:
+        subtitle_lines.append(hook)
+    for scene in scenes:
+        subtitle = scene.get("subtitle", "")
+        if subtitle:
+            subtitle_lines.append(subtitle)
+    if cta:
+        subtitle_lines.append(cta)
+    youtube_subtitles_only = "\n".join(subtitle_lines)
+
+    return {
+        "instagram_full": instagram_full,
+        "kakao": kakao,
+        "youtube_full": youtube_full,
+        "youtube_subtitles_only": youtube_subtitles_only,
+    }
