@@ -104,6 +104,15 @@ def _check_office_password() -> bool:
         st.query_params["auth"] = expected
         return True
 
+    # ⭐ 네이버 OAuth callback 처리 (이미 회사 인증 완료된 상태에서 네이버 로그인 후 복귀)
+    # URL에 ?code=... 가 있으면 = 네이버 인증 후 복귀한 상태
+    # → 자동으로 인증된 것으로 처리 (이전에 로그인했던 사용자)
+    if st.query_params.get("code"):
+        st.session_state["authenticated"] = True
+        st.query_params["auth"] = expected
+        # ?code= 는 4번 탭에서 처리하도록 유지 (제거 X)
+        return True
+
     # 로그인 화면
     st.title("🔐 JRE일본부동산 블로그 시스템")
     st.caption("사무실 비밀번호를 입력하세요.")
@@ -188,8 +197,13 @@ with st.sidebar:
     st.subheader("AI 모델 (Claude)")
     model = st.selectbox(
         "Claude 모델",
-        ["claude-opus-4-7", "claude-sonnet-4-6"],
-        help="하이브리드/Claude 모드에서 사용. Opus 4.7: 최고 정확도",
+        ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"],
+        index=0,
+        help=(
+            "Opus 4.7: ⭐ 권장 — 최고 정확도 (도면 분석·블로그 생성에 가장 정확)\n"
+            "Sonnet 4.6: 균형형 — 정확도 양호 + 빠름\n"
+            "Haiku 4.5: 가장 빠름 — 간단한 매물·테스트용"
+        ),
     )
 
     st.divider()
@@ -455,6 +469,24 @@ with tab2:
 
             if blog_posts:
                 st.session_state["blog_posts"] = blog_posts
+
+                # ⭐ 이력에 누적 저장 (제목 + 카톡 요약 + 전체 데이터)
+                # 새로 생성된 블로그를 이력 맨 위에 추가 (최신순)
+                history = st.session_state.get("blog_history", [])
+                created_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+                for bp in blog_posts:
+                    post = bp["post"]
+                    history.insert(0, {
+                        "timestamp": created_at,
+                        "filename": bp["filename"],
+                        "title": post.get("title", ""),
+                        "summary_for_chat": post.get("summary_for_chat", ""),
+                        "html_content": post.get("html_content", ""),
+                        "hashtags": post.get("hashtags", []),
+                    })
+                # 이력은 최대 100개까지만 유지 (메모리 보호)
+                st.session_state["blog_history"] = history[:100]
+
                 st.success(
                     f"✅ 블로그 {len(blog_posts)}개 생성 완료! 3번 탭에서 확인하세요."
                 )
@@ -466,6 +498,79 @@ with tab2:
 # ───── Tab 3: 블로그 미리보기 ─────
 with tab3:
     blog_posts = st.session_state.get("blog_posts")
+    blog_history = st.session_state.get("blog_history", [])
+
+    # ⭐ 과거 작업 이력 (생성된 블로그가 누적 저장됨)
+    # 새로 작업해도 이전 결과들을 다시 볼 수 있음
+    if blog_history:
+        with st.expander(
+            f"📚 이번 세션 작업 이력 — 총 {len(blog_history)}개 (제목·카톡요약 보존)",
+            expanded=False,
+        ):
+            st.caption(
+                "💡 분석을 새로 해도 이전에 생성한 블로그들의 제목·카톡 요약·본문이 "
+                "여기에 자동 저장됩니다. 새로고침하면 사라지니, 필요한 것은 "
+                "복사하거나 JSON 다운로드해 두세요."
+            )
+
+            # 이력 검색
+            search_q = st.text_input(
+                "🔍 이력 검색 (제목·파일명)",
+                key="history_search",
+                placeholder="예: 신주쿠, 1K, japanreal2_1.jpg ...",
+            )
+
+            filtered = blog_history
+            if search_q:
+                q = search_q.lower()
+                filtered = [
+                    h for h in blog_history
+                    if q in h.get("title", "").lower()
+                    or q in h.get("filename", "").lower()
+                ]
+
+            if not filtered:
+                st.info("검색 결과가 없습니다.")
+            else:
+                for h_idx, h in enumerate(filtered):
+                    with st.container():
+                        st.markdown(
+                            f"**{h_idx+1}. {h['title']}**  \n"
+                            f"<span style='color:#888;font-size:13px'>"
+                            f"📁 {h['filename']} · 🕒 {h['timestamp']}</span>",
+                            unsafe_allow_html=True,
+                        )
+                        col_a, col_b = st.columns([3, 1])
+                        with col_a:
+                            st.code(
+                                h.get("summary_for_chat", ""),
+                                language=None,
+                                wrap_lines=True,
+                            )
+                        with col_b:
+                            st.download_button(
+                                "💾 JSON",
+                                json.dumps(h, ensure_ascii=False, indent=2),
+                                file_name=f"blog_history_{h['timestamp'].replace(' ','_').replace(':','')}.json",
+                                mime="application/json",
+                                key=f"hist_dl_{h_idx}",
+                                use_container_width=True,
+                            )
+                        # HTML 본문도 펼쳐서 다시 볼 수 있게
+                        with st.expander("📄 본문 HTML 다시 보기", expanded=False):
+                            st.markdown(
+                                h.get("html_content", ""),
+                                unsafe_allow_html=True,
+                            )
+                            st.markdown("**해시태그**")
+                            st.code(" ".join(h.get("hashtags", [])), language=None)
+                        st.divider()
+
+            # 이력 전체 삭제 버튼
+            if st.button("🗑️ 모든 이력 삭제", type="secondary"):
+                st.session_state.pop("blog_history", None)
+                st.rerun()
+
     if not blog_posts:
         st.info("👈 2번 탭에서 블로그 글을 생성하세요.")
     else:
@@ -714,7 +819,8 @@ with tab4:
     if not st.session_state.get("naver_access_token"):
         st.markdown(
             "### 🔐 최초 1회 네이버 카페 인증 필요\n\n"
-            "**카페 매니저 계정**으로 인증하면 이후 자동 갱신되어 영구 자동 발행이 가능합니다."
+            "**카페 매니저 또는 부매니저 계정**으로 인증하면 이후 자동 갱신되어 "
+            "영구 자동 발행이 가능합니다."
         )
 
         auth_url = client.get_auth_url()
@@ -727,7 +833,10 @@ with tab4:
 
         st.caption(
             "1. 위 버튼 클릭 → 네이버 로그인 페이지가 새 탭에서 열림\n"
-            "2. **카페 매니저 계정**으로 로그인\n"
+            "2. **글쓰기 권한이 있는 계정**으로 로그인:\n"
+            "   - ✅ 카페 매니저 계정\n"
+            "   - ✅ 카페 부매니저 계정\n"
+            "   - ✅ 해당 게시판에 글쓰기 권한이 있는 일반 회원 계정\n"
             "3. '동의하기' 클릭\n"
             "4. 이 페이지로 자동 복귀 → 인증 완료\n\n"
             "💡 이 인증은 한 번만 하면 됩니다."
