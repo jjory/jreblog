@@ -17,6 +17,7 @@ import re
 import time
 from pathlib import Path
 from typing import Optional, Literal
+from urllib.parse import quote
 
 import anthropic
 
@@ -231,7 +232,6 @@ BLOG_GENERATION_PROMPT = """\
 • [장점 1]
 • [장점 2]
 • [장점 3]
-
 ```
 
 **작성 시 주의**:
@@ -239,7 +239,7 @@ BLOG_GENERATION_PROMPT = """\
 - 추천 포인트는 2~4개, 매물의 실제 강점만 (광고 문구 X)
 - 매물명·주소·계약기간은 절대 포함하지 말 것
 - 첫 줄에 인사말이나 광고성 문구 넣지 말 것 (바로 정보부터 시작)
-- 마지막 줄은 카카오톡 ID 안내로 고정
+- ⭐ **카카오톡 ID·전화번호·상담 안내는 절대 포함하지 말 것** (이미 다른 곳에 있음)
 
 각 섹션은 정보 위주로 간결하게. 광고 문구만 채우지 말 것.
 """
@@ -326,6 +326,45 @@ def _ensure_table_styles(html: str) -> str:
     return html
 
 
+def _append_map_link(summary: str, property_data: dict) -> str:
+    """
+    카카오톡 요약 끝에 구글맵 위치 링크를 자동으로 추가.
+
+    검색 키워드 우선순위:
+    1. address (주소) — 가장 정확
+    2. property_name (매물명) — 건물명으로 검색
+    3. nearest_station 역명 — 위치 대략 표시
+
+    구글맵 URL: https://www.google.com/maps/search/?api=1&query=<encoded>
+    카카오톡에서 클릭하면 자동으로 구글맵 앱 또는 웹이 열림.
+    """
+    if not summary:
+        return summary
+
+    address = (property_data.get("address") or "").strip()
+    property_name = (property_data.get("property_name") or "").strip()
+    nearest = property_data.get("nearest_station") or {}
+    station = (nearest.get("station") or "").strip()
+
+    # 검색 쿼리 결정 (주소 > 매물명 > 역명)
+    query = address or property_name
+    if not query and station:
+        query = f"{station}駅"  # 역명 + 駅
+
+    if not query:
+        return summary  # 위치 정보 없으면 그대로 반환
+
+    # URL 인코딩 (일본어 한자도 안전하게 처리)
+    encoded = quote(query, safe="")
+    map_url = f"https://www.google.com/maps/search/?api=1&query={encoded}"
+
+    # 카톡 요약 끝에 위치 줄 추가 (이미 있으면 중복 추가 안 함)
+    if "🗺️" in summary or "google.com/maps" in summary:
+        return summary
+
+    return f"{summary}\n\n🗺️ 위치 보기: {map_url}"
+
+
 def generate_blog_post(
     property_data: dict,
     target_visa: VisaType = "all",
@@ -387,7 +426,7 @@ def generate_blog_post(
         style_instructions=style_instructions,
         custom_instructions=custom_block,
         property_json=json.dumps(prop, ensure_ascii=False, indent=2),
-        kakao=os.getenv("KAKAO_TALK_ID", "japanreal"),
+        kakao=os.getenv("KAKAO_TALK_ID", "japanreal2"),
         phone=os.getenv("COMPANY_PHONE", "070-8201-5740"),
         core_hashtags=" ".join(CORE_HASHTAGS),
     )
@@ -421,6 +460,12 @@ def generate_blog_post(
             if result.get("html_content"):
                 result["html_content"] = _ensure_table_styles(result["html_content"])
                 result["html_content"] = _highlight_check_needed(result["html_content"])
+
+            # 카톡 요약에 구글맵 위치 링크 자동 추가
+            if result.get("summary_for_chat"):
+                result["summary_for_chat"] = _append_map_link(
+                    result["summary_for_chat"], property_data
+                )
 
             result["_meta"] = {
                 "target_visa": target_visa,
