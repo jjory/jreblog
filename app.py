@@ -37,7 +37,7 @@ from src.generator import (
     generate_blog_post,
     list_available_styles,
 )
-from src.naver_publisher import NaverBlogClient
+from src.naver_publisher import NaverCafeClient, format_publish_error_korean
 
 # ─────────────────────────────────────────────────
 # 설정 로드 (로컬 .env / 클라우드 Streamlit Secrets)
@@ -241,7 +241,7 @@ def _generate_worker(property_data, target_visa, style_name, custom_instructions
 # 4단계 탭
 # ─────────────────────────────────────────────────
 tab1, tab2, tab3, tab4 = st.tabs(
-    ["1️⃣ 도면 업로드", "2️⃣ 추출 결과·스타일 선택", "3️⃣ 블로그 미리보기", "4️⃣ 네이버 발행"]
+    ["1️⃣ 도면 업로드", "2️⃣ 추출 결과·스타일 선택", "3️⃣ 블로그 미리보기", "4️⃣ 네이버 카페 발행"]
 )
 
 # ───── Tab 1: 업로드 (병렬 분석) ─────
@@ -570,10 +570,65 @@ with tab3:
                 st.markdown("**해시태그**")
                 st.code(" ".join(post.get("hashtags", [])), language=None)
 
+                # ⭐ 네이버 발행 보조 — 본문 HTML 자동 복사 + 글쓰기 페이지 열기
+                st.markdown("---")
+                st.markdown("**✍️ 네이버 블로그 발행 보조**")
+
+                html_content = post.get("html_content", "")
+                html_json = json.dumps(html_content)  # JS에 안전하게 전달
+
+                st.components.v1.html(
+                    f"""
+                    <button id="naver-btn-{idx}"
+                        style="
+                            background:#03c75a;
+                            color:white;
+                            border:none;
+                            padding:14px 24px;
+                            font-size:15px;
+                            font-weight:600;
+                            border-radius:8px;
+                            cursor:pointer;
+                            width:100%;
+                            box-shadow:0 2px 4px rgba(0,0,0,0.1);
+                        ">
+                        📋 본문 HTML 복사 + 네이버 블로그 글쓰기 열기
+                    </button>
+                    <p id="status-{idx}" style="
+                        margin-top:8px;
+                        font-size:13px;
+                        color:#555;
+                        font-family:sans-serif;
+                        min-height:18px;
+                    "></p>
+                    <script>
+                        document.getElementById('naver-btn-{idx}').addEventListener('click', function() {{
+                            const html = {html_json};
+                            const status = document.getElementById('status-{idx}');
+                            navigator.clipboard.writeText(html).then(() => {{
+                                status.innerHTML = '✅ HTML 클립보드에 복사 완료! 네이버 글쓰기 페이지가 새 탭에 열립니다.';
+                                status.style.color = '#03c75a';
+                                window.open('https://blog.naver.com/PostWriteForm.naver', '_blank');
+                            }}).catch(err => {{
+                                status.innerHTML = '❌ 복사 실패: ' + err.message + ' (아래 HTML 다운로드 사용)';
+                                status.style.color = '#d32f2f';
+                            }});
+                        }});
+                    </script>
+                    """,
+                    height=110,
+                )
+
+                st.caption(
+                    "💡 사용법: 위 초록색 버튼 클릭 → 네이버 글쓰기 페이지가 새 탭에 열림 → "
+                    "글쓰기 화면 우측 위 **'기본 도구'** 옆 ⋮ → **'HTML 편집'** 클릭 → "
+                    "편집창에 **Ctrl+V** 로 붙여넣기 → 발행"
+                )
+
                 c1, c2 = st.columns(2)
                 with c1:
                     st.download_button(
-                        "💾 HTML 다운로드 (SmartEditor용)",
+                        "💾 HTML 다운로드 (백업)",
                         build_naver_smarteditor_html(post),
                         file_name=f"blog_{idx+1}_{Path(bp['filename']).stem}.html",
                         mime="text/html",
@@ -588,66 +643,204 @@ with tab3:
                         key=f"dl_json_{idx}",
                     )
 
-# ───── Tab 4: 네이버 발행 ─────
+# ───── Tab 4: 네이버 카페 자동 발행 ─────
 with tab4:
-    st.subheader("📤 네이버 블로그 발행")
+    st.subheader("📤 네이버 카페 자동 발행")
     blog_posts = st.session_state.get("blog_posts")
     if not blog_posts:
-        st.info("먼저 블로그 글을 생성하세요.")
+        st.info("먼저 1·2·3번 탭에서 블로그 글을 생성하세요.")
         st.stop()
 
-    st.warning(
-        "⚠️ 사전 준비: 네이버 개발자센터 앱 등록 + '네이버 아이디로 로그인' 심사 통과 "
-        "+ 환경변수에 NAVER_CLIENT_ID/SECRET 설정"
-    )
+    # ─── 환경 변수 확인 ───
+    naver_client_id = os.getenv("NAVER_CLIENT_ID", "").strip()
+    naver_client_secret = os.getenv("NAVER_CLIENT_SECRET", "").strip()
+    naver_club_id = os.getenv("NAVER_CAFE_CLUB_ID", "").strip()
+    naver_menu_id = os.getenv("NAVER_CAFE_DEFAULT_MENU_ID", "").strip()
+    naver_redirect = os.getenv(
+        "NAVER_REDIRECT_URI", "https://jreblog.streamlit.app"
+    ).strip()
 
-    if not (os.getenv("NAVER_CLIENT_ID") and os.getenv("NAVER_CLIENT_SECRET")):
-        st.error("네이버 환경변수가 설정되지 않았습니다.")
+    if not (naver_client_id and naver_client_secret and naver_club_id):
+        st.error("⚠️ 네이버 카페 API 환경변수가 설정되지 않았습니다.")
         st.info(
-            "💡 3번 탭의 HTML 다운로드를 네이버 블로그 글쓰기 'HTML 편집' 모드에 "
-            "붙여넣어 발행하시는 것이 가장 안정적입니다."
+            "💡 **설정 방법**: Streamlit Cloud → Settings → Secrets 에 다음을 추가:\n\n"
+            "```\n"
+            'NAVER_CLIENT_ID = "발급받은_Client_ID"\n'
+            'NAVER_CLIENT_SECRET = "발급받은_Client_Secret"\n'
+            'NAVER_CAFE_CLUB_ID = "카페_club_id"\n'
+            'NAVER_CAFE_DEFAULT_MENU_ID = "기본_게시판_menu_id"\n'
+            'NAVER_REDIRECT_URI = "https://jreblog.streamlit.app"\n'
+            "```\n\n"
+            "💡 우선은 3번 탭의 '📋 본문 HTML 복사' 버튼으로 수동 발행 가능합니다."
         )
         st.stop()
 
+    # ─── 카페 클라이언트 준비 ───
     try:
-        client = NaverBlogClient()
-    except ValueError as e:
-        st.error(str(e))
+        client = NaverCafeClient(
+            client_id=naver_client_id,
+            client_secret=naver_client_secret,
+            redirect_uri=naver_redirect,
+            club_id=naver_club_id,
+            default_menu_id=naver_menu_id,
+            access_token=st.session_state.get("naver_access_token"),
+            refresh_token=st.session_state.get("naver_refresh_token"),
+        )
+    except Exception as e:
+        st.error(format_publish_error_korean(e))
         st.stop()
 
-    if not client.is_authenticated:
-        st.markdown(
-            f"### 🔐 네이버 인증 필요\n"
-            f"1. [이 URL]({client.get_auth_url()})에서 네이버 로그인\n"
-            f"2. 리다이렉트 URL의 `?code=` 뒤 코드 복사\n"
-            f"3. 아래에 붙여넣기"
-        )
-        code = st.text_input("Authorization Code")
-        if code and st.button("토큰 발급"):
+    # ─── OAuth 인증 흐름: URL의 ?code= 자동 처리 ───
+    auth_code_in_url = st.query_params.get("code", "")
+    if auth_code_in_url and not st.session_state.get("naver_access_token"):
+        with st.spinner("🔐 네이버 인증 처리 중..."):
             try:
-                client.exchange_code_for_token(code)
-                st.success("✅ 인증 완료!")
+                client.exchange_code_for_token(auth_code_in_url)
+                st.session_state["naver_access_token"] = client.access_token
+                st.session_state["naver_refresh_token"] = client.refresh_token
+                # ?code= 제거 (auth 토큰은 유지)
+                params = dict(st.query_params)
+                params.pop("code", None)
+                params.pop("state", None)
+                st.query_params.clear()
+                for k, v in params.items():
+                    st.query_params[k] = v
+                st.success("✅ 네이버 인증 완료! 이제 카페에 발행할 수 있습니다.")
                 st.rerun()
             except Exception as e:
-                st.error(f"❌ 인증 실패: {e}")
+                st.error(f"❌ 인증 실패: {format_publish_error_korean(e)}")
+
+    # ─── 인증 안 됐으면: 인증 안내 ───
+    if not st.session_state.get("naver_access_token"):
+        st.markdown(
+            "### 🔐 최초 1회 네이버 카페 인증 필요\n\n"
+            "**카페 매니저 계정**으로 인증하면 이후 자동 갱신되어 영구 자동 발행이 가능합니다."
+        )
+
+        auth_url = client.get_auth_url()
+
+        st.link_button(
+            "🔐 네이버 카페 인증하기 (새 탭에서 열기)",
+            auth_url,
+            use_container_width=True,
+        )
+
+        st.caption(
+            "1. 위 버튼 클릭 → 네이버 로그인 페이지가 새 탭에서 열림\n"
+            "2. **카페 매니저 계정**으로 로그인\n"
+            "3. '동의하기' 클릭\n"
+            "4. 이 페이지로 자동 복귀 → 인증 완료\n\n"
+            "💡 이 인증은 한 번만 하면 됩니다."
+        )
         st.stop()
 
-    st.markdown("발행할 글을 선택하세요.")
+    # ─── 인증 완료 후 발행 UI ───
+    st.success("✅ 네이버 인증 완료. 카페 발행 가능 상태입니다.")
+
+    with st.expander("ℹ️ 발행 설정 확인", expanded=False):
+        st.write(f"**카페 ID**: `{naver_club_id}`")
+        st.write(f"**기본 게시판 ID**: `{naver_menu_id}`")
+        try:
+            profile = client.get_profile()
+            st.write(f"**인증된 계정**: {profile.get('name', '?')} ({profile.get('email', '?')})")
+        except Exception:
+            pass
+
+        if st.button("🔓 인증 해제 (재인증)"):
+            st.session_state.pop("naver_access_token", None)
+            st.session_state.pop("naver_refresh_token", None)
+            st.rerun()
+
+    st.markdown("---")
+    st.markdown("### 📝 발행할 글 선택")
+
+    # 발행 옵션
+    col_opt1, col_opt2 = st.columns(2)
+    with col_opt1:
+        target_menu_id = st.text_input(
+            "게시판 ID",
+            value=naver_menu_id,
+            help="다른 게시판에 올리려면 변경. 기본값 = Streamlit Secrets의 NAVER_CAFE_DEFAULT_MENU_ID",
+        )
+    with col_opt2:
+        is_open_all = st.checkbox(
+            "전체 공개로 발행",
+            value=True,
+            help="해제하면 카페 멤버만 볼 수 있음",
+        )
+
+    # 발행 대상 선택 (체크박스)
+    st.markdown("**아래에서 발행할 글을 선택하세요:**")
+    selected_indices = []
     for idx, bp in enumerate(blog_posts):
         post = bp["post"]
-        c1, c2 = st.columns([3, 1])
-        with c1:
-            st.markdown(f"**{idx+1}. {post.get('title', '')}**")
-        with c2:
-            if st.button("🚀 발행", key=f"publish_{idx}"):
-                with st.spinner("네이버에 발행 중…"):
-                    try:
-                        client.write_post(
-                            title=post.get("title", ""),
-                            contents=post.get("html_content", ""),
-                            tags=post.get("hashtags", []),
-                            is_open=2,
-                        )
-                        st.success(f"✅ {idx+1}번 글 발행 완료!")
-                    except Exception as e:
-                        st.error(f"❌ 발행 실패: {e}")
+        title = post.get("title", bp["filename"])
+        if st.checkbox(f"{idx+1}. {title}", key=f"publish_select_{idx}"):
+            selected_indices.append(idx)
+
+    # 일괄 발행 버튼
+    st.markdown("---")
+    if st.button(
+        f"🚀 선택한 {len(selected_indices)}개 글 카페에 일괄 발행",
+        type="primary",
+        disabled=(len(selected_indices) == 0),
+        use_container_width=True,
+    ):
+        if not target_menu_id:
+            st.error("게시판 ID를 입력하세요.")
+        else:
+            progress = st.progress(0.0, text="발행 시작...")
+            results = []
+            errors = []
+
+            # 최신 토큰 동기화
+            client.access_token = st.session_state.get("naver_access_token")
+            client.refresh_token = st.session_state.get("naver_refresh_token")
+
+            total = len(selected_indices)
+            for i, idx in enumerate(selected_indices):
+                bp = blog_posts[idx]
+                post = bp["post"]
+                title = post.get("title", bp["filename"])
+                progress.progress(
+                    i / total, text=f"[{i+1}/{total}] '{title[:30]}...' 발행 중"
+                )
+                try:
+                    result = client.write_article(
+                        subject=title,
+                        content_html=post.get("html_content", ""),
+                        menu_id=target_menu_id,
+                        is_open=is_open_all,
+                    )
+                    # 토큰이 갱신됐을 수 있으니 session_state에 다시 저장
+                    st.session_state["naver_access_token"] = client.access_token
+                    results.append({
+                        "idx": idx,
+                        "title": title,
+                        "article_id": result["article_id"],
+                        "article_url": result["article_url"],
+                    })
+                except Exception as e:
+                    errors.append({
+                        "idx": idx,
+                        "title": title,
+                        "error": format_publish_error_korean(e),
+                    })
+
+            progress.progress(1.0, text="✅ 발행 완료")
+
+            # 결과 표시
+            if results:
+                st.success(f"✅ {len(results)}개 글 발행 성공!")
+                for r in results:
+                    st.markdown(
+                        f"- **{r['idx']+1}. {r['title']}**  →  "
+                        f"[카페에서 보기 (글 #{r['article_id']})]({r['article_url']})"
+                    )
+
+            if errors:
+                st.error(f"⚠️ {len(errors)}개 글 발행 실패")
+                for e in errors:
+                    st.markdown(f"**{e['idx']+1}. {e['title']}**")
+                    st.markdown(e["error"])
+
