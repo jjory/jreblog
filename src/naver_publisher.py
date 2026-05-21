@@ -219,9 +219,15 @@ class NaverCafeClient:
         """
         카페 게시판에 글 작성.
 
+        네이버 카페 API 공식 swagger 사양:
+        - URL: POST /v1/cafe/{clubid}/menu/{menuid}/articles
+        - Content-Type: application/x-www-form-urlencoded
+        - Required: subject (UTF-8), content (UTF-8)
+        - Optional: openyn (true=전체공개, 기본 멤버공개)
+
         Args:
-            subject: 제목
-            content_html: 본문 HTML
+            subject: 제목 (UTF-8)
+            content_html: 본문 HTML (UTF-8)
             menu_id: 게시판 ID (없으면 default_menu_id 사용)
             is_open: True = 전체 공개, False = 멤버 공개
             auto_refresh: access_token 만료 시 자동 갱신 (권장)
@@ -244,35 +250,29 @@ class NaverCafeClient:
         url = NAVER_CAFE_WRITE_URL.format(clubid=self.club_id, menuid=menu)
         headers = {
             "Authorization": f"Bearer {self.access_token}",
-            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            # Content-Type은 requests가 자동 설정 (form-urlencoded)
         }
 
-        # 네이버 카페 API는 form-urlencoded 형식, UTF-8 인코딩 필요
+        # 네이버 카페 API 파라미터 (공식 swagger 명세)
+        # - subject: 제목 (UTF-8)
+        # - content: 본문 (UTF-8) ⭐ "contenttext"가 아님!
+        # - openyn: true (전체 공개) / false (멤버 공개)
         data = {
             "subject": subject,
-            "contenttext": content_html,
-            "isopen": "true" if is_open else "false",
+            "content": content_html,
         }
+        if is_open:
+            data["openyn"] = "true"
 
-        # 1차 시도
-        resp = requests.post(
-            url,
-            headers=headers,
-            data=urlencode(data, encoding="utf-8"),
-            timeout=DEFAULT_TIMEOUT,
-        )
+        # requests가 자동으로 form-urlencoded + UTF-8 처리 (가장 안전)
+        resp = requests.post(url, headers=headers, data=data, timeout=DEFAULT_TIMEOUT)
 
         # 401 = 토큰 만료 → 자동 갱신 후 재시도
         if resp.status_code == 401 and auto_refresh and self.refresh_token:
             try:
                 self.refresh_access_token()
                 headers["Authorization"] = f"Bearer {self.access_token}"
-                resp = requests.post(
-                    url,
-                    headers=headers,
-                    data=urlencode(data, encoding="utf-8"),
-                    timeout=DEFAULT_TIMEOUT,
-                )
+                resp = requests.post(url, headers=headers, data=data, timeout=DEFAULT_TIMEOUT)
             except Exception as e:
                 raise RuntimeError(f"토큰 갱신 실패 → 재인증 필요: {e}")
 
@@ -284,24 +284,35 @@ class NaverCafeClient:
                 f"네이버 응답 파싱 실패 (HTTP {resp.status_code}): {resp.text[:300]}"
             )
 
-        # 에러 응답
-        if result.get("message", {}).get("status") != "200":
-            error_msg = result.get("message", {}).get("error_message") or str(result)
-            raise RuntimeError(f"카페 글쓰기 실패: {error_msg}")
+        # 네이버 카페 API 응답 형식 (성공/실패 모두 message.status 확인)
+        # 성공: {"message": {"status": "200", "result": {"articleId": "276", ...}}}
+        # 실패: {"message": {"status": "500", "error": {"code": "AP001", "msg": "..."}}}
+        msg = result.get("message", {})
+        status = str(msg.get("status", ""))
+
+        if status != "200":
+            error = msg.get("error", {})
+            error_code = error.get("code", "")
+            error_msg = error.get("msg") or error.get("error_message") or str(result)
+            raise RuntimeError(
+                f"카페 글쓰기 실패 [{error_code}]: {error_msg}"
+            )
 
         # 성공 응답에서 article_id 추출
+        result_obj = msg.get("result", {})
         article_id = (
-            result.get("message", {}).get("result", {}).get("articleId")
-            or result.get("message", {}).get("result", {}).get("articleid")
+            result_obj.get("articleId")
+            or result_obj.get("articleid")
             or ""
         )
 
         # 카페 글 직접 링크 조립
-        article_url = (
-            f"https://cafe.naver.com/ca-fe/cafes/{self.club_id}/articles/{article_id}"
-            if article_id
-            else f"https://cafe.naver.com/ca-fe/cafes/{self.club_id}"
-        )
+        if article_id:
+            article_url = (
+                f"https://cafe.naver.com/ca-fe/cafes/{self.club_id}/articles/{article_id}"
+            )
+        else:
+            article_url = f"https://cafe.naver.com/ca-fe/cafes/{self.club_id}"
 
         return {
             "article_id": str(article_id),
@@ -320,10 +331,18 @@ def format_publish_error_korean(e: Exception) -> str:
     """
     err = str(e).lower()
 
+    # 카페 API 고유 에러 코드
+    if "ap001" in err or "파라미터가 유효하지 않" in str(e):
+        return (
+            "📝 **요청 파라미터 오류 [AP001]**\n"
+            "→ 제목·본문이 비어 있거나, 본문에 카페가 허용하지 않는 태그가 있을 수 있습니다.\n"
+            "→ 본문 HTML에서 `<script>`, `<iframe>`, 외부 링크 등을 확인해 보세요."
+        )
+
     if "토큰 갱신 실패" in str(e) or "refresh" in err:
         return (
             "🔁 **인증 만료** — 다시 네이버 인증이 필요합니다.\n"
-            "→ 4번 탭에서 '네이버 카페 인증' 버튼을 다시 클릭하세요."
+            "→ 4번 탭의 '인증 해제' 후 '네이버 카페 인증' 버튼을 다시 클릭하세요."
         )
     if "access_token" in err and ("없습니다" in str(e) or "missing" in err):
         return (
@@ -362,4 +381,4 @@ def format_publish_error_korean(e: Exception) -> str:
             "→ 네이버 서버 일시 지연. 1~2분 후 다시 시도하세요."
         )
 
-    return f"⚠️ **카페 글쓰기 실패**: {str(e)[:200]}"
+    return f"⚠️ **카페 글쓰기 실패**: {str(e)[:250]}"
