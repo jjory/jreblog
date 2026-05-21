@@ -107,14 +107,15 @@ MEDIA_TYPES = {
 # ──────────────────────────────────────────────────────
 # 공통: 파일 → 이미지 바이트 리스트 (PDF는 페이지별로 분리)
 # ──────────────────────────────────────────────────────
-def _pdf_to_image_bytes_list(pdf_path: str, max_pages: int = 3) -> list[tuple[bytes, str]]:
+def _pdf_to_image_bytes_list(pdf_path: str, max_pages: int = 2) -> list[tuple[bytes, str]]:
     """
     PDF → 페이지별 (JPEG bytes, mime_type) 리스트.
 
     메모리 효율 최적화:
+    - max_pages=2: 마이소크는 보통 1페이지, 안전 마진으로 2페이지까지만
     - scale=2.0 (약 144 DPI): 마이소크 분석에 충분, 200 DPI 대비 약 50% 절감
     - JPEG quality=85: PNG 대비 약 70% 크기 감소, AI 분석 정확도 영향 거의 없음
-    - Streamlit Cloud 무료 1GB 메모리 환경에서 5개 동시 처리 가능
+    - Streamlit Cloud 무료 1GB 메모리 환경에서 안정 작동
     """
     import pypdfium2 as pdfium
 
