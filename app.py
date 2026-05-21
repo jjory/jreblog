@@ -38,6 +38,18 @@ from src.generator import (
     list_available_styles,
 )
 from src.naver_publisher import NaverCafeClient, format_publish_error_korean
+from src.persistence import (
+    load_history,
+    add_to_history,
+    delete_from_history,
+    clear_history,
+    save_session,
+    load_session,
+    clear_session,
+    cleanup_old_sessions,
+    generate_session_id,
+    HISTORY_RETENTION_DAYS,
+)
 
 # ─────────────────────────────────────────────────
 # 설정 로드 (로컬 .env / 클라우드 Streamlit Secrets)
@@ -104,13 +116,18 @@ def _check_office_password() -> bool:
         st.query_params["auth"] = expected
         return True
 
-    # ⭐ 네이버 OAuth callback 처리 (이미 회사 인증 완료된 상태에서 네이버 로그인 후 복귀)
-    # URL에 ?code=... 가 있으면 = 네이버 인증 후 복귀한 상태
-    # → 자동으로 인증된 것으로 처리 (이전에 로그인했던 사용자)
-    if st.query_params.get("code"):
+    # ⭐ 네이버 OAuth callback 자동 우회
+    # 네이버 로그인 후 복귀 시 URL에 ?code=, ?state=, ?error= 중 하나가 붙어옵니다.
+    # 이 파라미터가 있으면 = 직원이 이미 인증된 상태에서 네이버 인증을 진행한 것
+    # → 비밀번호 화면을 자동으로 우회하고 4번 탭으로 직행
+    has_oauth_params = (
+        st.query_params.get("code")
+        or st.query_params.get("state")
+        or st.query_params.get("error")
+    )
+    if has_oauth_params:
         st.session_state["authenticated"] = True
         st.query_params["auth"] = expected
-        # ?code= 는 4번 탭에서 처리하도록 유지 (제거 X)
         return True
 
     # 로그인 화면
@@ -131,6 +148,72 @@ def _check_office_password() -> bool:
 
 if not _check_office_password():
     st.stop()
+
+
+# ─────────────────────────────────────────────────
+# 세션 ID 관리 + 자동 복원 (새로고침 시 작업 유지)
+# ─────────────────────────────────────────────────
+def _ensure_session_id() -> str:
+    """
+    URL 쿼리에 session ID 보장.
+    - 이미 있으면 그 ID 사용 (새로고침해도 같음)
+    - 없으면 새로 생성하고 URL에 추가
+    """
+    sid = st.query_params.get("sid", "")
+    if not sid:
+        sid = generate_session_id()
+        st.query_params["sid"] = sid
+    return sid
+
+
+def _restore_session_if_needed():
+    """
+    페이지 첫 로드 시 디스크에서 세션 데이터 복원.
+    session_state에 이미 데이터가 있으면 (= 같은 탭 진행 중) 복원 안 함.
+    """
+    if st.session_state.get("_session_restored"):
+        return  # 이미 복원 시도함
+
+    sid = st.query_params.get("sid", "")
+    if not sid:
+        return
+
+    # 새로고침 직후엔 session_state가 비어 있음
+    # 디스크에서 복원 시도
+    saved = load_session(sid)
+    if saved:
+        if saved.get("properties") and not st.session_state.get("properties"):
+            st.session_state["properties"] = saved["properties"]
+        if saved.get("blog_posts") and not st.session_state.get("blog_posts"):
+            st.session_state["blog_posts"] = saved["blog_posts"]
+
+    st.session_state["_session_restored"] = True
+
+
+def _persist_session():
+    """현재 작업 상태를 디스크에 자동 저장."""
+    sid = st.query_params.get("sid", "")
+    if not sid:
+        return
+
+    data = {}
+    if st.session_state.get("properties"):
+        data["properties"] = st.session_state["properties"]
+    if st.session_state.get("blog_posts"):
+        data["blog_posts"] = st.session_state["blog_posts"]
+
+    if data:
+        save_session(sid, data)
+
+
+# 페이지 첫 로드 시: 세션 ID 보장 + 자동 복원 + 오래된 세션 정리
+_ensure_session_id()
+_restore_session_if_needed()
+
+# 임시 세션 파일 자동 정리 (24시간 이상 된 것)
+if not st.session_state.get("_cleanup_done"):
+    cleanup_old_sessions()
+    st.session_state["_cleanup_done"] = True
 
 
 st.title("🏠 JRE일본부동산 — 네이버 블로그 자동작성 시스템")
@@ -254,8 +337,14 @@ def _generate_worker(property_data, target_visa, style_name, custom_instructions
 # ─────────────────────────────────────────────────
 # 4단계 탭
 # ─────────────────────────────────────────────────
-tab1, tab2, tab3, tab4 = st.tabs(
-    ["1️⃣ 도면 업로드", "2️⃣ 추출 결과·스타일 선택", "3️⃣ 블로그 미리보기", "4️⃣ 네이버 카페 발행"]
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    [
+        "1️⃣ 도면 업로드",
+        "2️⃣ 추출 결과·스타일 선택",
+        "3️⃣ 블로그 미리보기",
+        "4️⃣ 네이버 카페 발행",
+        "5️⃣ 📚 이력 보관함",
+    ]
 )
 
 # ───── Tab 1: 업로드 (병렬 분석) ─────
@@ -327,6 +416,8 @@ with tab1:
             if properties:
                 st.session_state["properties"] = properties
                 st.session_state.pop("blog_posts", None)
+                # 디스크에 자동 저장 (새로고침 대비)
+                _persist_session()
                 st.success(
                     f"✅ {len(properties)}개 도면 분석 완료! 2번 탭에서 확인하세요."
                 )
@@ -470,25 +561,26 @@ with tab2:
             if blog_posts:
                 st.session_state["blog_posts"] = blog_posts
 
-                # ⭐ 이력에 누적 저장 (제목 + 카톡 요약 + 전체 데이터)
-                # 새로 생성된 블로그를 이력 맨 위에 추가 (최신순)
-                history = st.session_state.get("blog_history", [])
-                created_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+                # ⭐ 디스크에 영구 이력 저장 (10일 retention, 5번 탭에서 조회)
+                new_history_items = []
                 for bp in blog_posts:
                     post = bp["post"]
-                    history.insert(0, {
-                        "timestamp": created_at,
+                    new_history_items.append({
                         "filename": bp["filename"],
                         "title": post.get("title", ""),
                         "summary_for_chat": post.get("summary_for_chat", ""),
                         "html_content": post.get("html_content", ""),
                         "hashtags": post.get("hashtags", []),
                     })
-                # 이력은 최대 100개까지만 유지 (메모리 보호)
-                st.session_state["blog_history"] = history[:100]
+                add_to_history(new_history_items)
+
+                # 현재 세션도 디스크 저장 (새로고침 대비)
+                _persist_session()
 
                 st.success(
-                    f"✅ 블로그 {len(blog_posts)}개 생성 완료! 3번 탭에서 확인하세요."
+                    f"✅ 블로그 {len(blog_posts)}개 생성 완료! "
+                    f"3번 탭에서 확인하시거나, 5번 탭 '이력 보관함'에서 "
+                    f"나중에라도 다시 조회할 수 있습니다."
                 )
             if errors:
                 st.error("⚠️ 일부 블로그 생성 실패")
@@ -498,81 +590,12 @@ with tab2:
 # ───── Tab 3: 블로그 미리보기 ─────
 with tab3:
     blog_posts = st.session_state.get("blog_posts")
-    blog_history = st.session_state.get("blog_history", [])
-
-    # ⭐ 과거 작업 이력 (생성된 블로그가 누적 저장됨)
-    # 새로 작업해도 이전 결과들을 다시 볼 수 있음
-    if blog_history:
-        with st.expander(
-            f"📚 이번 세션 작업 이력 — 총 {len(blog_history)}개 (제목·카톡요약 보존)",
-            expanded=False,
-        ):
-            st.caption(
-                "💡 분석을 새로 해도 이전에 생성한 블로그들의 제목·카톡 요약·본문이 "
-                "여기에 자동 저장됩니다. 새로고침하면 사라지니, 필요한 것은 "
-                "복사하거나 JSON 다운로드해 두세요."
-            )
-
-            # 이력 검색
-            search_q = st.text_input(
-                "🔍 이력 검색 (제목·파일명)",
-                key="history_search",
-                placeholder="예: 신주쿠, 1K, japanreal2_1.jpg ...",
-            )
-
-            filtered = blog_history
-            if search_q:
-                q = search_q.lower()
-                filtered = [
-                    h for h in blog_history
-                    if q in h.get("title", "").lower()
-                    or q in h.get("filename", "").lower()
-                ]
-
-            if not filtered:
-                st.info("검색 결과가 없습니다.")
-            else:
-                for h_idx, h in enumerate(filtered):
-                    with st.container():
-                        st.markdown(
-                            f"**{h_idx+1}. {h['title']}**  \n"
-                            f"<span style='color:#888;font-size:13px'>"
-                            f"📁 {h['filename']} · 🕒 {h['timestamp']}</span>",
-                            unsafe_allow_html=True,
-                        )
-                        col_a, col_b = st.columns([3, 1])
-                        with col_a:
-                            st.code(
-                                h.get("summary_for_chat", ""),
-                                language=None,
-                                wrap_lines=True,
-                            )
-                        with col_b:
-                            st.download_button(
-                                "💾 JSON",
-                                json.dumps(h, ensure_ascii=False, indent=2),
-                                file_name=f"blog_history_{h['timestamp'].replace(' ','_').replace(':','')}.json",
-                                mime="application/json",
-                                key=f"hist_dl_{h_idx}",
-                                use_container_width=True,
-                            )
-                        # HTML 본문도 펼쳐서 다시 볼 수 있게
-                        with st.expander("📄 본문 HTML 다시 보기", expanded=False):
-                            st.markdown(
-                                h.get("html_content", ""),
-                                unsafe_allow_html=True,
-                            )
-                            st.markdown("**해시태그**")
-                            st.code(" ".join(h.get("hashtags", [])), language=None)
-                        st.divider()
-
-            # 이력 전체 삭제 버튼
-            if st.button("🗑️ 모든 이력 삭제", type="secondary"):
-                st.session_state.pop("blog_history", None)
-                st.rerun()
 
     if not blog_posts:
-        st.info("👈 2번 탭에서 블로그 글을 생성하세요.")
+        st.info(
+            "👈 2번 탭에서 블로그 글을 생성하세요.\n\n"
+            "💡 과거에 생성한 블로그 글은 **5번 탭 '이력 보관함'**에서 다시 조회·다운로드 가능합니다."
+        )
     else:
         st.subheader(f"📝 생성된 블로그 — 총 {len(blog_posts)}개")
 
@@ -953,3 +976,206 @@ with tab4:
                     st.markdown(f"**{e['idx']+1}. {e['title']}**")
                     st.markdown(e["error"])
 
+
+# ───── Tab 5: 📚 이력 보관함 ─────
+with tab5:
+    st.subheader("📚 작업 이력 보관함")
+    st.caption(
+        f"💡 생성된 모든 블로그가 자동 저장됩니다. "
+        f"**{HISTORY_RETENTION_DAYS}일 경과 시 자동 삭제**되며, "
+        f"수동 선택 삭제도 가능합니다."
+    )
+
+    history = load_history()
+
+    if not history:
+        st.info(
+            "아직 저장된 이력이 없습니다.\n\n"
+            "1·2번 탭에서 블로그를 생성하면 자동으로 여기에 저장됩니다."
+        )
+    else:
+        # 통계 표시
+        col_s1, col_s2, col_s3 = st.columns(3)
+        with col_s1:
+            st.metric("📊 총 이력", f"{len(history)}건")
+        with col_s2:
+            try:
+                latest_ts = datetime.fromisoformat(history[0]["timestamp"])
+                latest_str = latest_ts.strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                latest_str = "?"
+            st.metric("🆕 최근 작업", latest_str)
+        with col_s3:
+            try:
+                oldest_ts = datetime.fromisoformat(history[-1]["timestamp"])
+                days_old = (datetime.now() - oldest_ts).days
+                oldest_str = f"{days_old}일 전"
+            except Exception:
+                oldest_str = "?"
+            st.metric("🗓 가장 오래된", oldest_str)
+
+        st.divider()
+
+        # 검색
+        search_q = st.text_input(
+            "🔍 검색 (제목·파일명)",
+            key="hist_search_v2",
+            placeholder="예: 신주쿠, 1K, japanreal2_1.jpg",
+        )
+
+        # 필터링
+        filtered = history
+        if search_q:
+            q = search_q.lower()
+            filtered = [
+                h for h in history
+                if q in h.get("title", "").lower()
+                or q in h.get("filename", "").lower()
+            ]
+
+        if not filtered:
+            st.warning(f"'{search_q}' 검색 결과 없음")
+        else:
+            st.markdown(f"**검색 결과: {len(filtered)}건**")
+
+            # 선택 삭제 모드
+            col_btn1, col_btn2 = st.columns([1, 5])
+            with col_btn1:
+                if st.button("☑️ 모두 선택", use_container_width=True):
+                    for h in filtered:
+                        st.session_state[f"hist_sel_{h['id']}"] = True
+                    st.rerun()
+            with col_btn2:
+                if st.button("⬜ 모두 해제", use_container_width=True):
+                    for h in filtered:
+                        st.session_state[f"hist_sel_{h['id']}"] = False
+                    st.rerun()
+
+            st.divider()
+
+            # 이력 목록 표시
+            selected_ids = []
+            for idx, h in enumerate(filtered):
+                hid = h.get("id", "")
+                title = h.get("title", "(제목 없음)")
+                filename = h.get("filename", "")
+                timestamp = h.get("timestamp", "")
+
+                # 표시용 시간 포맷
+                try:
+                    ts_obj = datetime.fromisoformat(timestamp)
+                    ts_display = ts_obj.strftime("%Y-%m-%d %H:%M")
+                    # 며칠 전인지 계산
+                    days_ago = (datetime.now() - ts_obj).days
+                    days_left = HISTORY_RETENTION_DAYS - days_ago
+                    if days_left <= 2:
+                        retention_warn = f" ⚠️ **{days_left}일 후 자동 삭제**"
+                    else:
+                        retention_warn = ""
+                except Exception:
+                    ts_display = timestamp
+                    retention_warn = ""
+
+                # 체크박스 + 제목
+                col_chk, col_info = st.columns([0.5, 9])
+                with col_chk:
+                    checked = st.checkbox(
+                        " ",
+                        key=f"hist_sel_{hid}",
+                        label_visibility="collapsed",
+                    )
+                    if checked:
+                        selected_ids.append(hid)
+
+                with col_info:
+                    st.markdown(
+                        f"**{idx+1}. {title}**  \n"
+                        f"<span style='color:#888;font-size:13px'>"
+                        f"📁 {filename} · 🕒 {ts_display}{retention_warn}</span>",
+                        unsafe_allow_html=True,
+                    )
+
+                # 카톡 요약 표시
+                summary = h.get("summary_for_chat", "")
+                if summary:
+                    st.code(summary, language=None, wrap_lines=True)
+
+                # 추가 작업: 본문 + 다운로드 (펼침)
+                with st.expander("📄 본문 HTML + 해시태그 + 다운로드", expanded=False):
+                    html = h.get("html_content", "")
+                    if html:
+                        st.markdown(html, unsafe_allow_html=True)
+                    tags = h.get("hashtags", [])
+                    if tags:
+                        st.markdown("**해시태그**")
+                        st.code(" ".join(tags), language=None)
+
+                    # 다운로드 버튼들
+                    dl_col1, dl_col2 = st.columns(2)
+                    with dl_col1:
+                        st.download_button(
+                            "💾 HTML 다운로드",
+                            build_naver_smarteditor_html({
+                                "title": title,
+                                "html_content": html,
+                                "hashtags": tags,
+                            }),
+                            file_name=f"history_{hid}_{Path(filename).stem}.html",
+                            mime="text/html",
+                            key=f"hist_dl_html_{hid}",
+                            use_container_width=True,
+                        )
+                    with dl_col2:
+                        st.download_button(
+                            "📋 JSON 다운로드",
+                            json.dumps(h, ensure_ascii=False, indent=2),
+                            file_name=f"history_{hid}.json",
+                            mime="application/json",
+                            key=f"hist_dl_json_{hid}",
+                            use_container_width=True,
+                        )
+
+                st.divider()
+
+            # 선택 삭제 + 전체 삭제 버튼
+            st.markdown("---")
+            col_d1, col_d2, col_d3 = st.columns([2, 2, 6])
+            with col_d1:
+                if st.button(
+                    f"🗑️ 선택 항목 삭제 ({len(selected_ids)}개)",
+                    type="primary",
+                    disabled=(len(selected_ids) == 0),
+                    use_container_width=True,
+                ):
+                    delete_from_history(selected_ids)
+                    # 선택 상태 초기화
+                    for sid in selected_ids:
+                        st.session_state.pop(f"hist_sel_{sid}", None)
+                    st.success(f"✅ {len(selected_ids)}개 항목 삭제 완료")
+                    st.rerun()
+
+            with col_d2:
+                if st.button(
+                    "🗑️ 전체 삭제",
+                    type="secondary",
+                    use_container_width=True,
+                ):
+                    if st.session_state.get("_confirm_clear_all"):
+                        clear_history()
+                        st.session_state.pop("_confirm_clear_all", None)
+                        st.success("✅ 모든 이력 삭제 완료")
+                        st.rerun()
+                    else:
+                        st.session_state["_confirm_clear_all"] = True
+                        st.warning("⚠️ 한 번 더 클릭하면 모든 이력이 삭제됩니다.")
+
+            with col_d3:
+                # 전체 백업 다운로드
+                if filtered:
+                    st.download_button(
+                        f"📥 전체 백업 다운로드 ({len(history)}건 JSON)",
+                        json.dumps(history, ensure_ascii=False, indent=2),
+                        file_name=f"jre_history_backup_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+                        mime="application/json",
+                        use_container_width=True,
+                    )
