@@ -52,6 +52,10 @@ from src.persistence import (
     cleanup_old_sessions,
     generate_session_id,
     HISTORY_RETENTION_DAYS,
+    save_naver_tokens,
+    load_naver_tokens,
+    clear_naver_tokens,
+    is_gist_enabled,
 )
 
 # ─────────────────────────────────────────────────
@@ -808,6 +812,13 @@ with tab4:
         st.stop()
 
     # ─── 카페 클라이언트 준비 ───
+    # ⭐ session_state에 토큰 없으면 Gist에서 자동 복원 시도
+    if not st.session_state.get("naver_access_token"):
+        gist_access, gist_refresh = load_naver_tokens()
+        if gist_access and gist_refresh:
+            st.session_state["naver_access_token"] = gist_access
+            st.session_state["naver_refresh_token"] = gist_refresh
+
     try:
         client = NaverCafeClient(
             client_id=naver_client_id,
@@ -830,6 +841,8 @@ with tab4:
                 client.exchange_code_for_token(auth_code_in_url)
                 st.session_state["naver_access_token"] = client.access_token
                 st.session_state["naver_refresh_token"] = client.refresh_token
+                # ⭐ Gist에도 영구 저장 (슬립 후에도 보존)
+                save_naver_tokens(client.access_token, client.refresh_token)
                 # ?code= 제거 (auth 토큰은 유지)
                 params = dict(st.query_params)
                 params.pop("code", None)
@@ -837,7 +850,7 @@ with tab4:
                 st.query_params.clear()
                 for k, v in params.items():
                     st.query_params[k] = v
-                st.success("✅ 네이버 인증 완료! 이제 카페에 발행할 수 있습니다.")
+                st.success("✅ 네이버 인증 완료! (영구 저장됨, 슬립 후에도 유지)")
                 st.rerun()
             except Exception as e:
                 st.error(f"❌ 인증 실패: {format_publish_error_korean(e)}")
@@ -885,6 +898,7 @@ with tab4:
         if st.button("🔓 인증 해제 (재인증)"):
             st.session_state.pop("naver_access_token", None)
             st.session_state.pop("naver_refresh_token", None)
+            clear_naver_tokens()  # Gist에서도 삭제
             st.rerun()
 
     st.markdown("---")
@@ -1226,11 +1240,21 @@ with tab5:
 # ───── Tab 6: 📚 이력 보관함 ─────
 with tab6:
     st.subheader("📚 작업 이력 보관함")
-    st.caption(
-        f"💡 생성된 모든 블로그가 자동 저장됩니다. "
-        f"**{HISTORY_RETENTION_DAYS}일 경과 시 자동 삭제**되며, "
-        f"수동 선택 삭제도 가능합니다."
-    )
+
+    # ⭐ Gist 사용 가능 여부에 따라 안내 분기
+    if is_gist_enabled():
+        st.caption(
+            "💡 생성된 모든 블로그가 자동 저장됩니다. "
+            "**영구 보존** — 수동 삭제 전까지 안 사라집니다. "
+            "🌐 GitHub Gist에 안전하게 저장 중 (슬립 후에도 유지)."
+        )
+    else:
+        st.caption(
+            "💡 생성된 모든 블로그가 자동 저장됩니다. "
+            "**영구 보존** — 수동 삭제 전까지 안 사라집니다.\n\n"
+            "⚠️ GITHUB_TOKEN 미설정 — 임시 저장 모드 (Streamlit 슬립 시 사라질 수 있음). "
+            "영구 보존을 원하시면 Streamlit Secrets에 GITHUB_TOKEN 추가하세요."
+        )
 
     history = load_history()
 
@@ -1311,13 +1335,8 @@ with tab6:
                 try:
                     ts_obj = datetime.fromisoformat(timestamp)
                     ts_display = ts_obj.strftime("%Y-%m-%d %H:%M")
-                    # 며칠 전인지 계산
-                    days_ago = (datetime.now() - ts_obj).days
-                    days_left = HISTORY_RETENTION_DAYS - days_ago
-                    if days_left <= 2:
-                        retention_warn = f" ⚠️ **{days_left}일 후 자동 삭제**"
-                    else:
-                        retention_warn = ""
+                    # ⭐ 영구 보존이라 자동 삭제 경고 없음
+                    retention_warn = ""
                 except Exception:
                     ts_display = timestamp
                     retention_warn = ""
