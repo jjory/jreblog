@@ -340,7 +340,37 @@ def _generate_worker(property_data, target_visa, style_name, custom_instructions
 # 4단계 탭
 # ─────────────────────────────────────────────────
 # ───── 작업 이력 보관함 (메인 페이지 상단 expander) ─────
-with st.expander("📚 작업 이력 보관함 (클릭하여 펼치기)", expanded=False):
+# ───── 작업 이력 보관함 (메인 페이지 상단 expander) ─────
+# Expander 제목에 이력 건수·용량을 동적으로 표시 (펼치지 않고도 확인 가능)
+try:
+    _hist_preview = load_history()
+    _hist_count = len(_hist_preview)
+except Exception:
+    _hist_count = 0
+
+# 파일 크기 계산 (사람이 읽기 좋은 단위로 포맷)
+try:
+    from src.persistence import HISTORY_FILE
+    if HISTORY_FILE.exists():
+        _hist_bytes = HISTORY_FILE.stat().st_size
+        if _hist_bytes < 1024:
+            _hist_size = f"{_hist_bytes}B"
+        elif _hist_bytes < 1024 * 1024:
+            _hist_size = f"{_hist_bytes/1024:.1f}KB"
+        else:
+            _hist_size = f"{_hist_bytes/(1024*1024):.2f}MB"
+    else:
+        _hist_size = "0B"
+except Exception:
+    _hist_size = "?"
+
+# Expander 제목: 건수와 용량 같이 표시
+if _hist_count == 0:
+    _expander_label = "📚 작업 이력 보관함 (비어 있음 · 클릭하여 펼치기)"
+else:
+    _expander_label = f"📚 작업 이력 보관함 ({_hist_count}건 · {_hist_size} · 클릭하여 펼치기)"
+
+with st.expander(_expander_label, expanded=False):
     st.caption(
         "💡 생성된 모든 블로그가 자동 저장됩니다. "
         "**영구 보존** — 수동 삭제 전까지 안 사라집니다."
@@ -359,18 +389,20 @@ with st.expander("📚 작업 이력 보관함 (클릭하여 펼치기)", expand
             "1·2번 탭에서 블로그를 생성하면 자동으로 여기에 저장됩니다."
         )
     else:
-        # 통계 표시
-        col_s1, col_s2, col_s3 = st.columns(3)
+        # 통계 표시 (4개 칸: 건수·용량·최근·오래된)
+        col_s1, col_s2, col_s3, col_s4 = st.columns(4)
         with col_s1:
             st.metric("📊 총 이력", f"{len(history)}건")
         with col_s2:
+            st.metric("💾 저장 용량", _hist_size)
+        with col_s3:
             try:
                 latest_ts = datetime.fromisoformat(history[0]["timestamp"])
-                latest_str = latest_ts.strftime("%Y-%m-%d %H:%M")
+                latest_str = latest_ts.strftime("%m-%d %H:%M")
             except Exception:
                 latest_str = "?"
             st.metric("🆕 최근 작업", latest_str)
-        with col_s3:
+        with col_s4:
             try:
                 oldest_ts = datetime.fromisoformat(history[-1]["timestamp"])
                 days_old = (datetime.now() - oldest_ts).days
