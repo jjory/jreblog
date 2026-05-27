@@ -309,63 +309,164 @@ def _build_excel_report(history: list) -> bytes:
     return buf.getvalue()
 
 
+# ─────────────────────────────────────────────────
+# 인증 시스템 — 이메일 + 비밀번호 (역할 기반)
+# ─────────────────────────────────────────────────
+from src.persistence import (
+    init_admin_if_needed,
+    authenticate_user,
+    add_user as db_add_user,
+    delete_user as db_delete_user,
+    change_password as db_change_password,
+    list_users as db_list_users,
+    load_admin_settings,
+    save_admin_settings,
+    is_valid_email,
+    ADMIN_EMAIL,
+    ALLOWED_DOMAIN,
+)
 
-def _auth_token() -> str:
-    """비밀번호로부터 인증 토큰을 만들어 URL에 보관 가능하게 함."""
-    pw = os.getenv("OFFICE_PASSWORD", "")
-    return hashlib.sha256(pw.encode("utf-8")).hexdigest()[:24]
+# 첫 실행 시 관리자 계정 자동 생성 (Render 환경변수 ADMIN_INITIAL_PASSWORD 사용)
+_admin_initial_pw = os.getenv("ADMIN_INITIAL_PASSWORD", "").strip()
+if _admin_initial_pw:
+    init_admin_if_needed(_admin_initial_pw)
 
 
-def _check_office_password() -> bool:
-    office_pw = os.getenv("OFFICE_PASSWORD", "").strip()
-    if not office_pw:
-        return True
+def _email_token(email: str) -> str:
+    """이메일로부터 URL 토큰 생성 (계정 기억용)"""
+    seed = (email + os.getenv("ADMIN_INITIAL_PASSWORD", "secret")).encode("utf-8")
+    return hashlib.sha256(seed).hexdigest()[:24]
 
-    expected = _auth_token()
 
-    # URL의 인증 토큰 확인 (새로고침 후 로그인 유지)
-    url_token = st.query_params.get("auth", "")
-    if url_token == expected:
-        st.session_state["authenticated"] = True
-        return True
-
-    if st.session_state.get("authenticated"):
-        # 세션엔 인증돼 있는데 URL 토큰 없으면 동기화
-        st.query_params["auth"] = expected
-        return True
-
-    # ⭐ 네이버 OAuth callback 자동 우회
-    # 네이버 로그인 후 복귀 시 URL에 ?code=, ?state=, ?error= 중 하나가 붙어옵니다.
-    # 이 파라미터가 있으면 = 직원이 이미 인증된 상태에서 네이버 인증을 진행한 것
-    # → 비밀번호 화면을 자동으로 우회하고 4번 탭으로 직행
+def _check_login() -> bool:
+    """로그인 확인. 성공 시 True, 로그인 화면 표시 시 False."""
+    # ⭐ 네이버 OAuth callback 자동 우회 (이미 로그인된 상태)
     has_oauth_params = (
         st.query_params.get("code")
         or st.query_params.get("state")
         or st.query_params.get("error")
     )
-    if has_oauth_params:
-        st.session_state["authenticated"] = True
-        st.query_params["auth"] = expected
+    if has_oauth_params and st.session_state.get("user"):
+        return True
+
+    # URL 토큰으로 자동 로그인 (세션 무제한)
+    url_email = st.query_params.get("user_email", "")
+    url_token = st.query_params.get("auth", "")
+    if url_email and url_token:
+        expected = _email_token(url_email)
+        if url_token == expected:
+            # 토큰 검증되면 사용자 정보 다시 로드 (역할 변경 반영)
+            from src.persistence import load_users
+            users = load_users()
+            info = users.get(url_email)
+            if info:
+                st.session_state["user"] = {
+                    "email": url_email,
+                    "role": info.get("role", "user"),
+                }
+                return True
+
+    # session_state 직접 확인
+    if st.session_state.get("user"):
         return True
 
     # 로그인 화면
-    st.title("🔐 JRE일본부동산 블로그 시스템")
-    st.caption("사무실 비밀번호를 입력하세요.")
-    with st.form("login_form"):
-        password = st.text_input("사무실 비밀번호", type="password")
-        submitted = st.form_submit_button("입장")
-    if submitted:
-        if password == office_pw:
-            st.session_state["authenticated"] = True
-            st.query_params["auth"] = expected
-            st.rerun()
-        else:
-            st.error("비밀번호가 틀렸습니다.")
+    _render_login_screen()
     return False
 
 
-if not _check_office_password():
+def _render_login_screen():
+    """로그인 화면 렌더링 — 가독성 좋은 디자인"""
+    # 페이지 중앙 정렬
+    _, col_center, _ = st.columns([1, 2, 1])
+    with col_center:
+        st.markdown("<br><br>", unsafe_allow_html=True)
+        st.markdown(
+            "<div style='text-align:center;'>"
+            "<h1 style='margin-bottom:0;'>🏠 JRE일본부동산</h1>"
+            "<p style='color:#666;margin-top:0;'>네이버 블로그 자동작성 시스템</p>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # 관리자 계정 미설정 시 안내
+        from src.persistence import load_users
+        users = load_users()
+        if not users:
+            st.error(
+                "⚠️ **관리자 계정이 아직 설정되지 않았습니다.**\n\n"
+                "Render Dashboard → Environment에서 "
+                "`ADMIN_INITIAL_PASSWORD` 환경변수를 추가한 후 재배포해주세요."
+            )
+            st.stop()
+
+        with st.container(border=True):
+            st.markdown("### 🔐 로그인")
+
+            with st.form("login_form_v2"):
+                # 이메일 기억 기능 — 최근 로그인 이메일 자동 입력
+                remembered_email = st.session_state.get("remembered_email", "")
+                email = st.text_input(
+                    "📧 이메일",
+                    value=remembered_email,
+                    placeholder="info@win-bro.com",
+                    autocomplete="email",
+                )
+                password = st.text_input(
+                    "🔒 비밀번호",
+                    type="password",
+                    autocomplete="current-password",
+                )
+                submitted = st.form_submit_button("로그인", type="primary", use_container_width=True)
+
+                if submitted:
+                    user = authenticate_user(email, password)
+                    if user:
+                        # 세션에 저장
+                        st.session_state["user"] = {
+                            "email": user["email"],
+                            "role": user["role"],
+                        }
+                        st.session_state["remembered_email"] = user["email"]
+                        # URL 토큰에 이메일 정보 저장 (계정 기억)
+                        st.query_params["user_email"] = user["email"]
+                        st.query_params["auth"] = _email_token(user["email"])
+                        st.rerun()
+                    else:
+                        st.error("❌ 이메일 또는 비밀번호가 올바르지 않습니다.")
+
+        st.markdown(
+            "<br><div style='text-align:center;color:#999;font-size:12px;'>"
+            "© WinBro LLC · JRE일본부동산"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+
+# 로그인 확인 — 통과 못 하면 여기서 멈춤
+if not _check_login():
     st.stop()
+
+
+# 로그인된 사용자 정보 (전역에서 사용)
+current_user = st.session_state.get("user", {})
+current_email = current_user.get("email", "")
+current_role = current_user.get("role", "user")
+is_admin = (current_role == "admin")
+
+
+def _logout():
+    """로그아웃 — 세션 + URL 토큰 모두 제거"""
+    st.session_state.pop("user", None)
+    # remembered_email은 유지 (다음 로그인 시 자동 입력)
+    if "user_email" in st.query_params:
+        del st.query_params["user_email"]
+    if "auth" in st.query_params:
+        del st.query_params["auth"]
+
+
+
 
 
 # ─────────────────────────────────────────────────
@@ -434,10 +535,57 @@ if not st.session_state.get("_cleanup_done"):
     st.session_state["_cleanup_done"] = True
 
 
-st.title("🏠 JRE일본부동산 — 네이버 블로그 자동작성 시스템")
+st.title("🏠 JRE일본부동산")
 st.caption(
-    f"마이소크 최대 {MAX_UPLOADS}개 업로드 → Claude AI 병렬 분석 → "
-    "한국어 블로그 일괄 생성"
+    f"네이버 블로그 자동작성 시스템 · 마이소크 최대 {MAX_UPLOADS}개 업로드 → "
+    "AI 병렬 분석 → 한국어 블로그 일괄 생성"
+)
+
+# 사용자 환영 카드 — 본인 통계 표시
+try:
+    _my_history = [
+        h for h in load_history()
+        if (h.get("user_email") or ADMIN_EMAIL) == current_email
+    ]
+    _my_count = len(_my_history)
+    _my_cost = _my_count * 110  # 매물당 약 110원 (Opus + Extended Thinking)
+    _my_this_month = sum(
+        1 for h in _my_history
+        if h.get("timestamp", "")[:7] == datetime.now().strftime("%Y-%m")
+    )
+except Exception:
+    _my_count = _my_cost = _my_this_month = 0
+
+_role_label = "👑 관리자" if is_admin else "👤 사용자"
+st.markdown(
+    f"""
+<div style='background:linear-gradient(135deg,#E3F2FD 0%,#F3E5F5 100%);
+            padding:14px 18px;border-radius:10px;margin-bottom:12px;
+            border:1px solid #BBDEFB;'>
+  <div style='display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:12px;'>
+    <div>
+      <span style='font-size:11px;color:#1976D2;font-weight:600;'>{_role_label}</span><br>
+      <span style='font-size:15px;color:#333;font-weight:600;'>{current_email}</span>
+    </div>
+    <div style='display:flex;gap:20px;flex-wrap:wrap;'>
+      <div style='text-align:center;'>
+        <div style='font-size:11px;color:#666;'>내 매물</div>
+        <div style='font-size:18px;font-weight:700;color:#1976D2;'>{_my_count}건</div>
+      </div>
+      <div style='text-align:center;'>
+        <div style='font-size:11px;color:#666;'>이번 달</div>
+        <div style='font-size:18px;font-weight:700;color:#2E7D32;'>{_my_this_month}건</div>
+      </div>
+      <div style='text-align:center;'>
+        <div style='font-size:11px;color:#666;'>AI 비용</div>
+        <div style='font-size:18px;font-weight:700;color:#F57C00;'>{_my_cost:,}원</div>
+      </div>
+    </div>
+  </div>
+</div>
+""",
+    unsafe_allow_html=True,
 )
 
 
@@ -445,14 +593,24 @@ st.caption(
 # 사이드바
 # ─────────────────────────────────────────────────
 with st.sidebar:
-    if os.getenv("OFFICE_PASSWORD", "").strip():
-        if st.button("🚪 로그아웃", use_container_width=True):
-            st.query_params.clear()
-            st.session_state.clear()
-            st.rerun()
-        st.divider()
+    # ─── 사용자 정보 카드 (가독성 개선) ───
+    role_badge = "👑 관리자" if is_admin else "👤 사용자"
+    st.markdown(
+        f"<div style='padding:12px;background:#F0F7FF;border-radius:8px;border:1px solid #BBDEFB;'>"
+        f"<div style='font-size:11px;color:#1976D2;font-weight:600;margin-bottom:4px;'>{role_badge}</div>"
+        f"<div style='font-size:13px;color:#333;font-weight:500;word-break:break-all;'>{current_email}</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
 
-    st.header("⚙️ 설정")
+    if st.button("🚪 로그아웃", use_container_width=True, key="logout_btn"):
+        _logout()
+        st.rerun()
+
+    st.divider()
+
+    # ─── 작업 설정 (모든 사용자) ───
+    st.markdown("### ⚙️ 작업 설정")
 
     target_visa = st.selectbox(
         "타깃 비자 (참고용)",
@@ -471,51 +629,157 @@ with st.sidebar:
     )
 
     st.divider()
-    st.subheader("🔬 분석 엔진")
-    has_gemini = bool(os.getenv("GEMINI_API_KEY", "").strip())
-    engine_options = {
-        "hybrid": "🔀 하이브리드 (무료+Claude) ⭐ 추천",
-        "gemini": "🆓 Gemini 무료만",
-        "claude": "💎 Claude 유료만 (최고 정확도)",
-    }
-    engine = st.selectbox(
-        "분석 엔진 선택",
-        options=list(engine_options.keys()),
-        format_func=lambda k: engine_options[k],
-        index=0,
-        help=(
-            "하이브리드: Gemini 무료 시도 → 자신도 낮으면 Claude 자동 재시도. "
-            "GEMINI_API_KEY 미설정 시 자동으로 Claude만 사용."
-        ),
-    )
-    if engine in ("hybrid", "gemini") and not has_gemini:
-        st.warning(
-            "⚠️ GEMINI_API_KEY가 설정되지 않았습니다. "
-            "https://aistudio.google.com/apikey 에서 무료 발급 후 "
-            "환경변수에 추가하세요. 현재는 Claude만 사용됩니다."
+
+    # ─── 관리자 전용: 분석 엔진 + AI 모델 ───
+    # 일반 사용자는 admin이 저장한 기본값 자동 사용
+    _admin_settings = load_admin_settings()
+
+    if is_admin:
+        st.markdown("### 🔬 분석 엔진 (관리자 전용)")
+        has_gemini = bool(os.getenv("GEMINI_API_KEY", "").strip())
+        engine_options = {
+            "hybrid": "🔀 하이브리드 (무료+Claude) ⭐ 추천",
+            "gemini": "🆓 Gemini 무료만",
+            "claude": "💎 Claude 유료만 (최고 정확도)",
+        }
+        engine_keys = list(engine_options.keys())
+        try:
+            engine_idx = engine_keys.index(_admin_settings.get("engine", "hybrid"))
+        except ValueError:
+            engine_idx = 0
+        engine = st.selectbox(
+            "분석 엔진 선택",
+            options=engine_keys,
+            format_func=lambda k: engine_options[k],
+            index=engine_idx,
+            help="이 설정은 모든 사용자에게 적용됩니다.",
+        )
+        if engine in ("hybrid", "gemini") and not has_gemini:
+            st.warning(
+                "⚠️ GEMINI_API_KEY가 설정되지 않았습니다. "
+                "https://aistudio.google.com/apikey 에서 무료 발급 후 "
+                "환경변수에 추가하세요. 현재는 Claude만 사용됩니다."
+            )
+
+        st.markdown("### 🤖 AI 모델 (관리자 전용)")
+        model_options = ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"]
+        try:
+            model_idx = model_options.index(_admin_settings.get("model", "claude-opus-4-7"))
+        except ValueError:
+            model_idx = 0
+        model = st.selectbox(
+            "Claude 모델",
+            model_options,
+            index=model_idx,
+            help=(
+                "Opus 4.7: ⭐ 권장 — 최고 정확도 (도면 분석·블로그 생성에 가장 정확)\n"
+                "Sonnet 4.6: 균형형 — 정확도 양호 + 빠름\n"
+                "Haiku 4.5: 가장 빠름 — 간단한 매물·테스트용\n\n"
+                "이 설정은 모든 사용자에게 적용됩니다."
+            ),
         )
 
-    st.subheader("AI 모델 (Claude)")
-    model = st.selectbox(
-        "Claude 모델",
-        ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"],
-        index=0,
-        help=(
-            "Opus 4.7: ⭐ 권장 — 최고 정확도 (도면 분석·블로그 생성에 가장 정확)\n"
-            "Sonnet 4.6: 균형형 — 정확도 양호 + 빠름\n"
-            "Haiku 4.5: 가장 빠름 — 간단한 매물·테스트용"
-        ),
-    )
+        # 변경되면 즉시 저장 (모든 사용자에게 반영)
+        if engine != _admin_settings.get("engine") or model != _admin_settings.get("model"):
+            save_admin_settings(engine, model)
+            st.caption(f"✅ 모든 사용자에게 적용됨")
+
+        st.divider()
+
+        # ─── 관리자 전용: 사용자 관리 ───
+        with st.expander("👥 사용자 관리 (관리자 전용)", expanded=False):
+            users = db_list_users()
+            st.caption(f"등록된 사용자: **{len(users)}명**")
+
+            # 사용자 목록 표시
+            for u in users:
+                u_role = u["role"]
+                u_email = u["email"]
+                role_icon = "👑" if u_role == "admin" else "👤"
+                last_login = u.get("last_login", "")
+                last_login_str = last_login[:10] if last_login else "없음"
+
+                with st.container(border=True):
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        st.markdown(
+                            f"{role_icon} **{u_email}**  \n"
+                            f"<span style='color:#888;font-size:11px;'>"
+                            f"마지막 로그인: {last_login_str}</span>",
+                            unsafe_allow_html=True,
+                        )
+                    with col2:
+                        if u_role != "admin":
+                            if st.button("🗑", key=f"del_user_{u_email}", help="이 사용자 삭제"):
+                                ok, msg = db_delete_user(u_email)
+                                if ok:
+                                    st.success(msg)
+                                    st.rerun()
+                                else:
+                                    st.error(msg)
+
+            st.divider()
+            st.markdown("**➕ 새 사용자 추가**")
+            with st.form("add_user_form"):
+                new_email = st.text_input(
+                    "이메일",
+                    placeholder=f"staff1{ALLOWED_DOMAIN}",
+                    help=f"{ALLOWED_DOMAIN} 도메인만 허용",
+                )
+                new_password = st.text_input(
+                    "비밀번호 (최소 4자)",
+                    type="password",
+                    help="이 비밀번호를 직원에게 직접 전달하세요.",
+                )
+                add_submitted = st.form_submit_button(
+                    "➕ 사용자 추가",
+                    type="primary",
+                    use_container_width=True,
+                )
+                if add_submitted:
+                    ok, msg = db_add_user(new_email, new_password, current_email)
+                    if ok:
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+
+            st.divider()
+            st.markdown("**🔒 비밀번호 변경**")
+            with st.form("change_pw_form"):
+                pw_email = st.selectbox(
+                    "사용자",
+                    options=[u["email"] for u in users],
+                )
+                new_pw = st.text_input(
+                    "새 비밀번호",
+                    type="password",
+                )
+                pw_submitted = st.form_submit_button(
+                    "🔒 비밀번호 변경",
+                    use_container_width=True,
+                )
+                if pw_submitted:
+                    ok, msg = db_change_password(pw_email, new_pw)
+                    if ok:
+                        st.success(msg)
+                    else:
+                        st.error(msg)
+
+    else:
+        # 일반 사용자: admin이 설정한 값 자동 사용 (UI에 표시 안 함)
+        engine = _admin_settings.get("engine", "hybrid")
+        model = _admin_settings.get("model", "claude-opus-4-7")
 
     st.divider()
     st.caption(
-        "👥 **동시 접속 사용 안내**\n\n"
+        "💡 **사용 안내**\n\n"
         "여러 직원이 동시에 접속해도 각자의 작업이 분리됩니다.\n\n"
-        "⚠️ **단, 같은 시각에 분석을 동시 실행하면 메모리 부족으로 "
-        "에러가 날 수 있습니다.** 가능하면:\n"
-        "- 다른 직원이 분석 중일 때는 잠시 기다리기\n"
-        "- 또는 5~10분 간격을 두고 사용하기"
+        "⚠️ 같은 시각에 분석을 동시 실행하면 메모리 부족 에러가 날 수 있으니, "
+        "가능하면 5~10분 간격을 두고 사용하세요."
     )
+
+
 
     st.divider()
     st.caption(
@@ -560,14 +824,19 @@ def _generate_worker(property_data, target_visa, style_name, custom_instructions
 # Expander 제목에 이력 건수·용량을 동적으로 표시 (펼치지 않고도 확인 가능)
 try:
     _hist_preview = load_history()
-    _hist_count = len(_hist_preview)
+    # 권한별 필터링 (제목 미리보기용)
+    if is_admin:
+        _hist_count = len(_hist_preview)
+    else:
+        _hist_count = sum(1 for h in _hist_preview 
+                          if (h.get("user_email") or ADMIN_EMAIL) == current_email)
 except Exception:
     _hist_count = 0
 
-# 파일 크기 계산 (사람이 읽기 좋은 단위로 포맷)
+# 파일 크기 계산 (사람이 읽기 좋은 단위로 포맷) — 관리자만 정확한 디스크 사용량 표시
 try:
     from src.persistence import HISTORY_FILE
-    if HISTORY_FILE.exists():
+    if HISTORY_FILE.exists() and is_admin:
         _hist_bytes = HISTORY_FILE.stat().st_size
         if _hist_bytes < 1024:
             _hist_size = f"{_hist_bytes}B"
@@ -576,15 +845,18 @@ try:
         else:
             _hist_size = f"{_hist_bytes/(1024*1024):.2f}MB"
     else:
-        _hist_size = "0B"
+        _hist_size = ""
 except Exception:
-    _hist_size = "?"
+    _hist_size = ""
 
-# Expander 제목: 건수와 용량 같이 표시
+# Expander 제목: 건수와 용량 같이 표시 (일반 사용자는 본인 매물 기준)
+_label_prefix = "📚 작업 이력 보관함" if is_admin else "📚 내 작업 이력"
 if _hist_count == 0:
-    _expander_label = "📚 작업 이력 보관함 (비어 있음 · 클릭하여 펼치기)"
+    _expander_label = f"{_label_prefix} (비어 있음 · 클릭하여 펼치기)"
+elif _hist_size:
+    _expander_label = f"{_label_prefix} ({_hist_count}건 · {_hist_size} · 클릭하여 펼치기)"
 else:
-    _expander_label = f"📚 작업 이력 보관함 ({_hist_count}건 · {_hist_size} · 클릭하여 펼치기)"
+    _expander_label = f"{_label_prefix} ({_hist_count}건 · 클릭하여 펼치기)"
 
 with st.expander(_expander_label, expanded=False):
     st.caption(
@@ -594,10 +866,20 @@ with st.expander(_expander_label, expanded=False):
 
     # 이력 로드 (실패해도 빈 리스트 반환)
     try:
-        history = load_history()
+        history_all = load_history()
+        # 기존 이력 (user_email 없음) → admin@win-bro.com 작성으로 처리
+        for h in history_all:
+            if not h.get("user_email"):
+                h["user_email"] = ADMIN_EMAIL
+        # 권한별 필터링: 관리자는 전체, 일반 사용자는 본인 매물만
+        if is_admin:
+            history = history_all
+        else:
+            history = [h for h in history_all if h.get("user_email") == current_email]
     except Exception as e:
         st.error(f"⚠️ 이력 로드 중 에러: {e}")
         history = []
+        history_all = []
 
     if not history:
         st.info(
@@ -924,6 +1206,177 @@ with st.expander(_expander_label, expanded=False):
                         mime="application/json",
                         use_container_width=True,
                     )
+
+
+# ───── 📊 전체 통계 (모든 사용자) ─────
+# 회사 전체 매물 통계. 관리자/사용자 모두 조회 가능.
+try:
+    _total_history_all = load_history()
+    for h in _total_history_all:
+        if not h.get("user_email"):
+            h["user_email"] = ADMIN_EMAIL
+    _total_count = len(_total_history_all)
+except Exception:
+    _total_history_all = []
+    _total_count = 0
+
+_total_label = f"📊 회사 전체 통계 ({_total_count}건 누적 · 클릭하여 펼치기)"
+with st.expander(_total_label, expanded=False):
+    st.caption("💡 WinBro LLC 전체 매물의 누적 통계 (모든 사용자가 조회 가능)")
+
+    if not _total_history_all:
+        st.info("아직 매물 데이터가 없습니다.")
+    else:
+        # 4개 요약 카드
+        cc1, cc2, cc3, cc4 = st.columns(4)
+        with cc1:
+            st.metric("📊 전체 매물", f"{_total_count}건")
+        with cc2:
+            # 활성 사용자 수
+            active_users = set(h.get("user_email", ADMIN_EMAIL) for h in _total_history_all)
+            st.metric("👥 활성 사용자", f"{len(active_users)}명")
+        with cc3:
+            # 이번 달 매물
+            this_month = datetime.now().strftime("%Y-%m")
+            this_month_count = sum(
+                1 for h in _total_history_all
+                if h.get("timestamp", "")[:7] == this_month
+            )
+            st.metric("📅 이번 달", f"{this_month_count}건")
+        with cc4:
+            # 즐겨찾기 수
+            fav_count = sum(1 for h in _total_history_all if h.get("favorite"))
+            st.metric("⭐ 즐겨찾기", f"{fav_count}건")
+
+        st.divider()
+
+        # 월별 차트
+        st.markdown("**📅 월별 매물 생성 추이 (전사)**")
+        by_month = _aggregate_by_month(_total_history_all)
+        if by_month:
+            st.bar_chart(by_month, height=200)
+
+        # 월세 통계
+        st.markdown("**💰 월세+관리비 전사 통계**")
+        rent_stats = _calc_rent_stats(_total_history_all)
+        if rent_stats["count"] > 0:
+            rcol1, rcol2, rcol3, rcol4 = st.columns(4)
+            rcol1.metric("평균", _format_yen(rent_stats["avg"]))
+            rcol2.metric("중앙값", _format_yen(rent_stats["median"]))
+            rcol3.metric("최저", _format_yen(rent_stats["min"]))
+            rcol4.metric("최고", _format_yen(rent_stats["max"]))
+
+        # 지역 분포
+        d_col1, d_col2, d_col3 = st.columns(3)
+        with d_col1:
+            st.markdown("**🏷 구별 분포 TOP 10**")
+            by_ward = _aggregate_by_ward(_total_history_all)
+            if by_ward:
+                for ward, cnt in list(by_ward.items())[:10]:
+                    bar = "▓" * min(cnt, 20)
+                    st.markdown(f"`{ward[:8]:<10}` {bar} **{cnt}건**")
+        with d_col2:
+            st.markdown("**🚆 노선 TOP 10**")
+            by_line = _aggregate_by_line(_total_history_all, 10)
+            if by_line:
+                for line, cnt in by_line.items():
+                    bar = "▓" * min(cnt, 20)
+                    st.markdown(f"`{line[:10]:<12}` {bar} **{cnt}건**")
+        with d_col3:
+            st.markdown("**🚉 역 TOP 10**")
+            by_station = _aggregate_by_station(_total_history_all, 10)
+            if by_station:
+                for station, cnt in by_station.items():
+                    bar = "▓" * min(cnt, 20)
+                    st.markdown(f"`{station[:8]:<10}` {bar} **{cnt}건**")
+
+
+# ───── 📈 직원별 통계 (관리자 전용) ─────
+if is_admin:
+    _staff_label = f"📈 직원별 작업 통계 (관리자 전용 · 클릭하여 펼치기)"
+    with st.expander(_staff_label, expanded=False):
+        st.caption("💡 각 직원의 작업 수량과 누적 AI 사용 비용을 확인합니다.")
+
+        if not _total_history_all:
+            st.info("아직 매물 데이터가 없습니다.")
+        else:
+            # 사용자별 집계
+            users_list = db_list_users()
+            user_emails = [u["email"] for u in users_list]
+
+            # 각 매물의 추정 AI 비용 (블로그 생성 옵션 1+2+3 적용 후 평균)
+            # 매물당: 도면 분석 약 50원 + 블로그 생성 (Extended Thinking) 약 60원 = 약 110원
+            COST_PER_PROPERTY = 110
+
+            user_stats = {}
+            for h in _total_history_all:
+                uemail = h.get("user_email", ADMIN_EMAIL)
+                if uemail not in user_stats:
+                    user_stats[uemail] = {
+                        "count": 0,
+                        "rent_total": 0,
+                        "rent_count": 0,
+                        "first": h.get("timestamp", ""),
+                        "last": h.get("timestamp", ""),
+                    }
+                user_stats[uemail]["count"] += 1
+                rent = _extract_rent(h.get("title", ""))
+                if rent > 0:
+                    user_stats[uemail]["rent_total"] += rent
+                    user_stats[uemail]["rent_count"] += 1
+                ts = h.get("timestamp", "")
+                if ts:
+                    if not user_stats[uemail]["first"] or ts < user_stats[uemail]["first"]:
+                        user_stats[uemail]["first"] = ts
+                    if ts > user_stats[uemail]["last"]:
+                        user_stats[uemail]["last"] = ts
+
+            # 등록 사용자 + 매물 작성 사용자 모두 표시
+            all_emails = set(user_emails) | set(user_stats.keys())
+
+            # 통계 표 표시
+            st.markdown(f"**📊 전체 {len(all_emails)}명의 사용자**")
+
+            for uemail in sorted(all_emails, key=lambda e: (
+                # admin 먼저, 다음에 작업량 많은 순
+                e != ADMIN_EMAIL,
+                -user_stats.get(e, {}).get("count", 0),
+                e,
+            )):
+                stats = user_stats.get(uemail, {"count": 0, "rent_total": 0, "rent_count": 0, "last": ""})
+                u_info = next((u for u in users_list if u["email"] == uemail), None)
+                u_role = u_info["role"] if u_info else "(삭제됨)"
+                role_icon = "👑" if u_role == "admin" else "👤" if u_role == "user" else "❌"
+
+                count = stats["count"]
+                cost = count * COST_PER_PROPERTY
+                avg_rent = stats["rent_total"] // stats["rent_count"] if stats["rent_count"] > 0 else 0
+                last_work = stats["last"][:10] if stats["last"] else "없음"
+
+                with st.container(border=True):
+                    cc1, cc2, cc3, cc4 = st.columns([2.5, 1, 1, 1])
+                    with cc1:
+                        st.markdown(
+                            f"{role_icon} **{uemail}**  \n"
+                            f"<span style='color:#888;font-size:11px;'>"
+                            f"마지막 작업: {last_work}</span>",
+                            unsafe_allow_html=True,
+                        )
+                    with cc2:
+                        st.metric("📝 매물", f"{count}건", label_visibility="visible")
+                    with cc3:
+                        st.metric("💰 AI 비용", f"{cost:,}원", label_visibility="visible")
+                    with cc4:
+                        st.metric("📊 평균 월세", _format_yen(avg_rent) if avg_rent else "-", label_visibility="visible")
+
+            # 합계
+            st.divider()
+            total_props = sum(s["count"] for s in user_stats.values())
+            total_cost = total_props * COST_PER_PROPERTY
+            tc1, tc2, tc3 = st.columns(3)
+            tc1.metric("📊 전사 총 매물", f"{total_props}건")
+            tc2.metric("💰 전사 총 AI 비용", f"{total_cost:,}원")
+            tc3.metric("📅 이번 달", f"{this_month_count}건")
 
 
 # ───── 📱 SNS·쇼츠 콘텐츠 자동 생성 (메인 페이지 상단 expander) ─────
@@ -1403,7 +1856,7 @@ with tab2:
                         "html_content": post.get("html_content", ""),
                         "hashtags": post.get("hashtags", []),
                     })
-                add_to_history(new_history_items)
+                add_to_history(new_history_items, user_email=current_email)
 
                 # 현재 세션도 디스크 저장 (새로고침 대비)
                 _persist_session()
