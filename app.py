@@ -76,7 +76,7 @@ MAX_UPLOADS = 5
 # - 단일 사용자: 5파일을 2+2+1 배치로 처리 (약 60초)
 # - 3대 동시 사용: 3 × 2 = 6개 동시 처리 (메모리 여유)
 # 속도보다 안정성을 우선. 큰 PDF가 섞여도 안정 작동.
-MAX_PARALLEL_WORKERS = 2
+MAX_PARALLEL_WORKERS = 5
 
 st.set_page_config(
     page_title="🏠 JRE일본부동산 블로그 자동작성",
