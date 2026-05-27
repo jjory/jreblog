@@ -541,22 +541,36 @@ st.caption(
     "AI 병렬 분석 → 한국어 블로그 일괄 생성"
 )
 
-# 사용자 환영 카드 — 본인 통계 표시
+# 사용자 환영 카드 — 관리자는 전체 매물, 일반 사용자는 본인 매물 표시
 try:
-    _my_history = [
-        h for h in load_history()
-        if (h.get("user_email") or ADMIN_EMAIL) == current_email
-    ]
-    _my_count = len(_my_history)
+    _all_history = load_history()
+    # 기존 이력 호환성 (user_email 없는 경우)
+    for h in _all_history:
+        if not h.get("user_email"):
+            h["user_email"] = ADMIN_EMAIL
+
+    if is_admin:
+        # 관리자: 전사 전체 매물 표시
+        _shown_history = _all_history
+    else:
+        # 일반 사용자: 본인 매물만
+        _shown_history = [
+            h for h in _all_history
+            if h.get("user_email") == current_email
+        ]
+
+    _my_count = len(_shown_history)
     _my_cost = _my_count * 110  # 매물당 약 110원 (Opus + Extended Thinking)
     _my_this_month = sum(
-        1 for h in _my_history
+        1 for h in _shown_history
         if h.get("timestamp", "")[:7] == datetime.now().strftime("%Y-%m")
     )
 except Exception:
     _my_count = _my_cost = _my_this_month = 0
 
+# 라벨도 권한별로 다르게
 _role_label = "👑 관리자" if is_admin else "👤 사용자"
+_count_label = "전체 매물" if is_admin else "내 매물"
 st.markdown(
     f"""
 <div style='background:linear-gradient(135deg,#E3F2FD 0%,#F3E5F5 100%);
@@ -570,7 +584,7 @@ st.markdown(
     </div>
     <div style='display:flex;gap:20px;flex-wrap:wrap;'>
       <div style='text-align:center;'>
-        <div style='font-size:11px;color:#666;'>내 매물</div>
+        <div style='font-size:11px;color:#666;'>{_count_label}</div>
         <div style='font-size:18px;font-weight:700;color:#1976D2;'>{_my_count}건</div>
       </div>
       <div style='text-align:center;'>
@@ -770,6 +784,16 @@ with st.sidebar:
         # 일반 사용자: admin이 설정한 값 자동 사용 (UI에 표시 안 함)
         engine = _admin_settings.get("engine", "hybrid")
         model = _admin_settings.get("model", "claude-opus-4-7")
+
+    st.divider()
+
+    # ─── 📊 회사 전체 통계 (모든 사용자 공개) ───
+    with st.expander("📊 회사 전체 통계", expanded=False):
+        _render_company_stats()
+
+    # ─── 📈 직원별 작업 통계 (모든 사용자 공개) ───
+    with st.expander("📈 직원별 작업 통계", expanded=False):
+        _render_staff_stats()
 
     st.divider()
     st.caption(
@@ -1208,175 +1232,154 @@ with st.expander(_expander_label, expanded=False):
                     )
 
 
-# ───── 📊 전체 통계 (모든 사용자) ─────
-# 회사 전체 매물 통계. 관리자/사용자 모두 조회 가능.
-try:
-    _total_history_all = load_history()
-    for h in _total_history_all:
-        if not h.get("user_email"):
-            h["user_email"] = ADMIN_EMAIL
-    _total_count = len(_total_history_all)
-except Exception:
-    _total_history_all = []
-    _total_count = 0
+# ───── 통계 표시 함수 (사이드바에서 호출) ─────
+def _render_company_stats():
+    """회사 전체 통계 - 모든 사용자 공개"""
+    try:
+        history_all = load_history()
+        for h in history_all:
+            if not h.get("user_email"):
+                h["user_email"] = ADMIN_EMAIL
+    except Exception:
+        history_all = []
 
-_total_label = f"📊 회사 전체 통계 ({_total_count}건 누적 · 클릭하여 펼치기)"
-with st.expander(_total_label, expanded=False):
-    st.caption("💡 WinBro LLC 전체 매물의 누적 통계 (모든 사용자가 조회 가능)")
-
-    if not _total_history_all:
+    if not history_all:
         st.info("아직 매물 데이터가 없습니다.")
-    else:
-        # 4개 요약 카드
-        cc1, cc2, cc3, cc4 = st.columns(4)
-        with cc1:
-            st.metric("📊 전체 매물", f"{_total_count}건")
-        with cc2:
-            # 활성 사용자 수
-            active_users = set(h.get("user_email", ADMIN_EMAIL) for h in _total_history_all)
-            st.metric("👥 활성 사용자", f"{len(active_users)}명")
-        with cc3:
-            # 이번 달 매물
-            this_month = datetime.now().strftime("%Y-%m")
-            this_month_count = sum(
-                1 for h in _total_history_all
-                if h.get("timestamp", "")[:7] == this_month
+        return
+
+    # 4개 요약 카드
+    cc1, cc2 = st.columns(2)
+    with cc1:
+        st.metric("📊 전체", f"{len(history_all)}건")
+    with cc2:
+        active_users = set(h.get("user_email", ADMIN_EMAIL) for h in history_all)
+        st.metric("👥 사용자", f"{len(active_users)}명")
+
+    cc3, cc4 = st.columns(2)
+    with cc3:
+        this_month = datetime.now().strftime("%Y-%m")
+        this_month_count = sum(
+            1 for h in history_all
+            if h.get("timestamp", "")[:7] == this_month
+        )
+        st.metric("📅 이번달", f"{this_month_count}건")
+    with cc4:
+        fav_count = sum(1 for h in history_all if h.get("favorite"))
+        st.metric("⭐ 즐겨찾기", f"{fav_count}건")
+
+    st.markdown("**📅 월별 추이**")
+    by_month = _aggregate_by_month(history_all)
+    if by_month:
+        st.bar_chart(by_month, height=150)
+
+    # 월세 통계
+    rent_stats = _calc_rent_stats(history_all)
+    if rent_stats["count"] > 0:
+        st.markdown("**💰 월세 통계**")
+        st.caption(
+            f"평균: {_format_yen(rent_stats['avg'])} · "
+            f"중앙값: {_format_yen(rent_stats['median'])}"
+        )
+        st.caption(
+            f"최저: {_format_yen(rent_stats['min'])} · "
+            f"최고: {_format_yen(rent_stats['max'])}"
+        )
+
+    # 분포 (사이드바 좁아서 간소화)
+    st.markdown("**🏷 구별 TOP 5**")
+    by_ward = _aggregate_by_ward(history_all)
+    if by_ward:
+        for ward, cnt in list(by_ward.items())[:5]:
+            st.caption(f"`{ward}` — **{cnt}건**")
+
+    st.markdown("**🚉 역 TOP 5**")
+    by_station = _aggregate_by_station(history_all, 5)
+    if by_station:
+        for station, cnt in by_station.items():
+            st.caption(f"`{station}` — **{cnt}건**")
+
+
+def _render_staff_stats():
+    """직원별 작업 통계 - 모든 사용자 공개"""
+    try:
+        history_all = load_history()
+        for h in history_all:
+            if not h.get("user_email"):
+                h["user_email"] = ADMIN_EMAIL
+    except Exception:
+        history_all = []
+
+    if not history_all:
+        st.info("아직 매물 데이터가 없습니다.")
+        return
+
+    st.caption("💡 각 직원의 작업량과 누적 AI 비용")
+
+    # 사용자별 집계
+    users_list = db_list_users()
+    user_emails_set = {u["email"] for u in users_list}
+
+    COST_PER_PROPERTY = 110
+
+    user_stats = {}
+    for h in history_all:
+        uemail = h.get("user_email", ADMIN_EMAIL)
+        if uemail not in user_stats:
+            user_stats[uemail] = {
+                "count": 0,
+                "rent_total": 0,
+                "rent_count": 0,
+                "last": h.get("timestamp", ""),
+            }
+        user_stats[uemail]["count"] += 1
+        rent = _extract_rent(h.get("title", ""))
+        if rent > 0:
+            user_stats[uemail]["rent_total"] += rent
+            user_stats[uemail]["rent_count"] += 1
+        ts = h.get("timestamp", "")
+        if ts and ts > user_stats[uemail]["last"]:
+            user_stats[uemail]["last"] = ts
+
+    # 등록 사용자 + 매물 작성 사용자 모두 표시
+    all_emails = user_emails_set | set(user_stats.keys())
+
+    # 정렬: admin 먼저, 다음에 작업량 많은 순
+    sorted_emails = sorted(all_emails, key=lambda e: (
+        e != ADMIN_EMAIL,
+        -user_stats.get(e, {}).get("count", 0),
+        e,
+    ))
+
+    for uemail in sorted_emails:
+        stats = user_stats.get(uemail, {"count": 0, "rent_total": 0, "rent_count": 0, "last": ""})
+        u_info = next((u for u in users_list if u["email"] == uemail), None)
+        u_role = u_info["role"] if u_info else "(삭제)"
+        role_icon = "👑" if u_role == "admin" else "👤" if u_role == "user" else "❌"
+
+        count = stats["count"]
+        cost = count * COST_PER_PROPERTY
+
+        # 이메일 짧게 표시 (사이드바 좁음)
+        email_short = uemail.split("@")[0]
+
+        with st.container(border=True):
+            st.markdown(
+                f"{role_icon} **{email_short}**  \n"
+                f"<span style='color:#888;font-size:11px;'>{uemail}</span>",
+                unsafe_allow_html=True,
             )
-            st.metric("📅 이번 달", f"{this_month_count}건")
-        with cc4:
-            # 즐겨찾기 수
-            fav_count = sum(1 for h in _total_history_all if h.get("favorite"))
-            st.metric("⭐ 즐겨찾기", f"{fav_count}건")
+            sc1, sc2 = st.columns(2)
+            sc1.metric("📝 매물", f"{count}건", label_visibility="visible")
+            sc2.metric("💰 비용", f"{cost:,}원", label_visibility="visible")
 
-        st.divider()
-
-        # 월별 차트
-        st.markdown("**📅 월별 매물 생성 추이 (전사)**")
-        by_month = _aggregate_by_month(_total_history_all)
-        if by_month:
-            st.bar_chart(by_month, height=200)
-
-        # 월세 통계
-        st.markdown("**💰 월세+관리비 전사 통계**")
-        rent_stats = _calc_rent_stats(_total_history_all)
-        if rent_stats["count"] > 0:
-            rcol1, rcol2, rcol3, rcol4 = st.columns(4)
-            rcol1.metric("평균", _format_yen(rent_stats["avg"]))
-            rcol2.metric("중앙값", _format_yen(rent_stats["median"]))
-            rcol3.metric("최저", _format_yen(rent_stats["min"]))
-            rcol4.metric("최고", _format_yen(rent_stats["max"]))
-
-        # 지역 분포
-        d_col1, d_col2, d_col3 = st.columns(3)
-        with d_col1:
-            st.markdown("**🏷 구별 분포 TOP 10**")
-            by_ward = _aggregate_by_ward(_total_history_all)
-            if by_ward:
-                for ward, cnt in list(by_ward.items())[:10]:
-                    bar = "▓" * min(cnt, 20)
-                    st.markdown(f"`{ward[:8]:<10}` {bar} **{cnt}건**")
-        with d_col2:
-            st.markdown("**🚆 노선 TOP 10**")
-            by_line = _aggregate_by_line(_total_history_all, 10)
-            if by_line:
-                for line, cnt in by_line.items():
-                    bar = "▓" * min(cnt, 20)
-                    st.markdown(f"`{line[:10]:<12}` {bar} **{cnt}건**")
-        with d_col3:
-            st.markdown("**🚉 역 TOP 10**")
-            by_station = _aggregate_by_station(_total_history_all, 10)
-            if by_station:
-                for station, cnt in by_station.items():
-                    bar = "▓" * min(cnt, 20)
-                    st.markdown(f"`{station[:8]:<10}` {bar} **{cnt}건**")
-
-
-# ───── 📈 직원별 통계 (관리자 전용) ─────
-if is_admin:
-    _staff_label = f"📈 직원별 작업 통계 (관리자 전용 · 클릭하여 펼치기)"
-    with st.expander(_staff_label, expanded=False):
-        st.caption("💡 각 직원의 작업 수량과 누적 AI 사용 비용을 확인합니다.")
-
-        if not _total_history_all:
-            st.info("아직 매물 데이터가 없습니다.")
-        else:
-            # 사용자별 집계
-            users_list = db_list_users()
-            user_emails = [u["email"] for u in users_list]
-
-            # 각 매물의 추정 AI 비용 (블로그 생성 옵션 1+2+3 적용 후 평균)
-            # 매물당: 도면 분석 약 50원 + 블로그 생성 (Extended Thinking) 약 60원 = 약 110원
-            COST_PER_PROPERTY = 110
-
-            user_stats = {}
-            for h in _total_history_all:
-                uemail = h.get("user_email", ADMIN_EMAIL)
-                if uemail not in user_stats:
-                    user_stats[uemail] = {
-                        "count": 0,
-                        "rent_total": 0,
-                        "rent_count": 0,
-                        "first": h.get("timestamp", ""),
-                        "last": h.get("timestamp", ""),
-                    }
-                user_stats[uemail]["count"] += 1
-                rent = _extract_rent(h.get("title", ""))
-                if rent > 0:
-                    user_stats[uemail]["rent_total"] += rent
-                    user_stats[uemail]["rent_count"] += 1
-                ts = h.get("timestamp", "")
-                if ts:
-                    if not user_stats[uemail]["first"] or ts < user_stats[uemail]["first"]:
-                        user_stats[uemail]["first"] = ts
-                    if ts > user_stats[uemail]["last"]:
-                        user_stats[uemail]["last"] = ts
-
-            # 등록 사용자 + 매물 작성 사용자 모두 표시
-            all_emails = set(user_emails) | set(user_stats.keys())
-
-            # 통계 표 표시
-            st.markdown(f"**📊 전체 {len(all_emails)}명의 사용자**")
-
-            for uemail in sorted(all_emails, key=lambda e: (
-                # admin 먼저, 다음에 작업량 많은 순
-                e != ADMIN_EMAIL,
-                -user_stats.get(e, {}).get("count", 0),
-                e,
-            )):
-                stats = user_stats.get(uemail, {"count": 0, "rent_total": 0, "rent_count": 0, "last": ""})
-                u_info = next((u for u in users_list if u["email"] == uemail), None)
-                u_role = u_info["role"] if u_info else "(삭제됨)"
-                role_icon = "👑" if u_role == "admin" else "👤" if u_role == "user" else "❌"
-
-                count = stats["count"]
-                cost = count * COST_PER_PROPERTY
-                avg_rent = stats["rent_total"] // stats["rent_count"] if stats["rent_count"] > 0 else 0
-                last_work = stats["last"][:10] if stats["last"] else "없음"
-
-                with st.container(border=True):
-                    cc1, cc2, cc3, cc4 = st.columns([2.5, 1, 1, 1])
-                    with cc1:
-                        st.markdown(
-                            f"{role_icon} **{uemail}**  \n"
-                            f"<span style='color:#888;font-size:11px;'>"
-                            f"마지막 작업: {last_work}</span>",
-                            unsafe_allow_html=True,
-                        )
-                    with cc2:
-                        st.metric("📝 매물", f"{count}건", label_visibility="visible")
-                    with cc3:
-                        st.metric("💰 AI 비용", f"{cost:,}원", label_visibility="visible")
-                    with cc4:
-                        st.metric("📊 평균 월세", _format_yen(avg_rent) if avg_rent else "-", label_visibility="visible")
-
-            # 합계
-            st.divider()
-            total_props = sum(s["count"] for s in user_stats.values())
-            total_cost = total_props * COST_PER_PROPERTY
-            tc1, tc2, tc3 = st.columns(3)
-            tc1.metric("📊 전사 총 매물", f"{total_props}건")
-            tc2.metric("💰 전사 총 AI 비용", f"{total_cost:,}원")
-            tc3.metric("📅 이번 달", f"{this_month_count}건")
+    # 합계
+    st.divider()
+    total_props = sum(s["count"] for s in user_stats.values())
+    total_cost = total_props * COST_PER_PROPERTY
+    st.markdown(
+        f"**📊 전사 합계**: {total_props}건 · "
+        f"**💰 {total_cost:,}원**"
+    )
 
 
 # ───── 📱 SNS·쇼츠 콘텐츠 자동 생성 (메인 페이지 상단 expander) ─────
