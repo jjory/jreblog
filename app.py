@@ -45,6 +45,8 @@ from src.persistence import (
     add_to_history,
     delete_from_history,
     clear_history,
+    toggle_favorite,
+    delete_old_history,
     save_session,
     load_session,
     clear_session,
@@ -92,8 +94,220 @@ OUTPUT_FOLDER_PATH = (
 
 
 # ─────────────────────────────────────────────────
-# 인증 — 새로고침 시에도 로그인 유지 (URL 토큰 사용)
+# 통계 분석 헬퍼 — 이력 데이터에서 정보 추출
 # ─────────────────────────────────────────────────
+def _extract_ward(title: str) -> str:
+    """제목에서 구 추출. 표준 제목: '[이타바시구][도부토조선][도부네리마]역 ...'"""
+    if not title:
+        return "기타"
+    m = re.match(r"\[([^\]]+)\]", title)
+    if not m:
+        return "기타"
+    return m.group(1)
+
+
+def _extract_line(title: str) -> str:
+    """제목에서 노선 추출. 표준 제목 2번째 [...]."""
+    if not title:
+        return "기타"
+    matches = re.findall(r"\[([^\]]+)\]", title)
+    if len(matches) >= 2:
+        return matches[1]
+    return "기타"
+
+
+def _extract_station(title: str) -> str:
+    """제목에서 역명 추출. 표준 제목 3번째 [...]."""
+    if not title:
+        return "기타"
+    matches = re.findall(r"\[([^\]]+)\]", title)
+    if len(matches) >= 3:
+        return matches[2]
+    return "기타"
+
+
+def _extract_rent(title: str) -> int:
+    """제목에서 월세 추출 (엔 단위). '월세¥80,000+관리비¥5,000' → 80000 + 5000 = 85000"""
+    if not title:
+        return 0
+    total = 0
+    # 월세¥XX,XXX
+    m_rent = re.search(r"월세[¥￥]\s*([\d,]+)", title)
+    if m_rent:
+        try:
+            total += int(m_rent.group(1).replace(",", ""))
+        except ValueError:
+            pass
+    # 관리비¥X,XXX
+    m_mgmt = re.search(r"관리비[¥￥]\s*([\d,]+)", title)
+    if m_mgmt:
+        try:
+            total += int(m_mgmt.group(1).replace(",", ""))
+        except ValueError:
+            pass
+    return total
+
+
+def _extract_room_type(title: str) -> str:
+    """제목에서 방구조 추출. '도보5분 1K 월세¥...' → '1K'"""
+    if not title:
+        return "기타"
+    # 도보N분 [방구조] 월세 패턴
+    m = re.search(r"도보\s*\d+\s*분\s+([\w\d]+)\s+월세", title)
+    if m:
+        return m.group(1)
+    return "기타"
+
+
+def _aggregate_by_month(history: list) -> dict:
+    """월별 매물 건수 집계: {'2026-05': 12, '2026-06': 8, ...}"""
+    counter = {}
+    for h in history:
+        ts = h.get("timestamp", "")
+        if ts:
+            month = ts[:7]  # 'YYYY-MM'
+            counter[month] = counter.get(month, 0) + 1
+    # 시간순 정렬
+    return dict(sorted(counter.items()))
+
+
+def _aggregate_by_day(history: list, days: int = 30) -> dict:
+    """최근 N일간 일별 매물 건수: {'2026-05-27': 3, '2026-05-26': 2, ...}"""
+    counter = {}
+    cutoff = datetime.now() - timedelta(days=days)
+    cutoff_iso = cutoff.isoformat(timespec="seconds")
+    for h in history:
+        ts = h.get("timestamp", "")
+        if ts and ts >= cutoff_iso:
+            day = ts[:10]  # 'YYYY-MM-DD'
+            counter[day] = counter.get(day, 0) + 1
+    # 시간순 정렬
+    return dict(sorted(counter.items()))
+
+
+def _aggregate_by_ward(history: list) -> dict:
+    """구별 매물 건수: {'이타바시구': 8, '신주쿠구': 5, ...} - 내림차순"""
+    counter = {}
+    for h in history:
+        ward = _extract_ward(h.get("title", ""))
+        counter[ward] = counter.get(ward, 0) + 1
+    return dict(sorted(counter.items(), key=lambda x: -x[1]))
+
+
+def _aggregate_by_station(history: list, top_n: int = 10) -> dict:
+    """역별 매물 건수 TOP N: {'이케부쿠로': 3, '신주쿠': 2, ...} - 내림차순"""
+    counter = {}
+    for h in history:
+        station = _extract_station(h.get("title", ""))
+        counter[station] = counter.get(station, 0) + 1
+    sorted_items = sorted(counter.items(), key=lambda x: -x[1])
+    return dict(sorted_items[:top_n])
+
+
+def _aggregate_by_line(history: list, top_n: int = 10) -> dict:
+    """노선별 매물 건수 TOP N - 내림차순"""
+    counter = {}
+    for h in history:
+        line = _extract_line(h.get("title", ""))
+        counter[line] = counter.get(line, 0) + 1
+    sorted_items = sorted(counter.items(), key=lambda x: -x[1])
+    return dict(sorted_items[:top_n])
+
+
+def _calc_rent_stats(history: list) -> dict:
+    """월세 통계: 평균·최저·최고·중앙값"""
+    rents = []
+    for h in history:
+        rent = _extract_rent(h.get("title", ""))
+        if rent > 0:
+            rents.append(rent)
+    if not rents:
+        return {"count": 0, "avg": 0, "min": 0, "max": 0, "median": 0}
+    rents_sorted = sorted(rents)
+    n = len(rents_sorted)
+    median = rents_sorted[n // 2] if n % 2 == 1 else (rents_sorted[n // 2 - 1] + rents_sorted[n // 2]) // 2
+    return {
+        "count": n,
+        "avg": sum(rents) // n,
+        "min": min(rents),
+        "max": max(rents),
+        "median": median,
+    }
+
+
+def _format_yen(amount: int) -> str:
+    """엔 금액을 보기 좋게 포맷: 85000 → '¥85,000'"""
+    if amount <= 0:
+        return "¥0"
+    return f"¥{amount:,}"
+
+
+def _build_excel_report(history: list) -> bytes:
+    """이력 전체를 Excel(xlsx)로 변환. openpyxl 사용."""
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, Alignment, PatternFill
+    except ImportError:
+        return b""
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "매물 이력"
+
+    # 헤더
+    headers = ["번호", "제목", "구", "노선", "역", "방구조", "월세+관리비(엔)", "파일명", "생성일시", "즐겨찾기", "해시태그"]
+    for col, h in enumerate(headers, start=1):
+        cell = ws.cell(row=1, column=col, value=h)
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+        cell.alignment = Alignment(horizontal="center")
+
+    # 데이터
+    for idx, h in enumerate(history, start=1):
+        title = h.get("title", "")
+        ws.cell(row=idx + 1, column=1, value=idx)
+        ws.cell(row=idx + 1, column=2, value=title)
+        ws.cell(row=idx + 1, column=3, value=_extract_ward(title))
+        ws.cell(row=idx + 1, column=4, value=_extract_line(title))
+        ws.cell(row=idx + 1, column=5, value=_extract_station(title))
+        ws.cell(row=idx + 1, column=6, value=_extract_room_type(title))
+        ws.cell(row=idx + 1, column=7, value=_extract_rent(title))
+        ws.cell(row=idx + 1, column=8, value=h.get("filename", ""))
+        ws.cell(row=idx + 1, column=9, value=h.get("timestamp", ""))
+        ws.cell(row=idx + 1, column=10, value="⭐" if h.get("favorite") else "")
+        tags = h.get("hashtags", [])
+        ws.cell(row=idx + 1, column=11, value=" ".join(tags) if tags else "")
+
+    # 컬럼 너비 조정
+    widths = [6, 50, 12, 18, 14, 10, 16, 22, 18, 8, 30]
+    for col_idx, w in enumerate(widths, start=1):
+        ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = w
+
+    # 통계 시트
+    ws2 = wb.create_sheet("통계 요약")
+    ws2.cell(row=1, column=1, value="구별 매물 분포").font = Font(bold=True, size=12)
+    by_ward = _aggregate_by_ward(history)
+    for i, (k, v) in enumerate(by_ward.items(), start=2):
+        ws2.cell(row=i, column=1, value=k)
+        ws2.cell(row=i, column=2, value=v)
+
+    row_offset = len(by_ward) + 4
+    ws2.cell(row=row_offset, column=1, value="역별 TOP 10").font = Font(bold=True, size=12)
+    by_station = _aggregate_by_station(history, 10)
+    for i, (k, v) in enumerate(by_station.items(), start=row_offset + 1):
+        ws2.cell(row=i, column=1, value=k)
+        ws2.cell(row=i, column=2, value=v)
+
+    ws2.column_dimensions["A"].width = 20
+    ws2.column_dimensions["B"].width = 10
+
+    # 바이트로 변환
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+
 def _auth_token() -> str:
     """비밀번호로부터 인증 토큰을 만들어 URL에 보관 가능하게 함."""
     pw = os.getenv("OFFICE_PASSWORD", "")
@@ -413,6 +627,120 @@ with st.expander(_expander_label, expanded=False):
 
         st.divider()
 
+        # ===== 📊 통계 대시보드 (중첩 expander, 펼침 기본) =====
+        with st.expander("📊 통계 대시보드 (펼치기)", expanded=True):
+            # 1) 월별 차트
+            st.markdown("**📅 월별 매물 생성 추이**")
+            by_month = _aggregate_by_month(history)
+            if by_month:
+                st.bar_chart(by_month, height=200)
+            else:
+                st.caption("데이터 없음")
+
+            # 2) 최근 30일 일별 차트
+            st.markdown("**📆 최근 30일 일별 추이**")
+            by_day = _aggregate_by_day(history, days=30)
+            if by_day:
+                st.bar_chart(by_day, height=200)
+            else:
+                st.caption("최근 30일 데이터 없음")
+
+            # 3) 월세 통계
+            st.markdown("**💰 월세+관리비 통계**")
+            rent_stats = _calc_rent_stats(history)
+            if rent_stats["count"] > 0:
+                rcol1, rcol2, rcol3, rcol4 = st.columns(4)
+                rcol1.metric("평균", _format_yen(rent_stats["avg"]))
+                rcol2.metric("중앙값", _format_yen(rent_stats["median"]))
+                rcol3.metric("최저", _format_yen(rent_stats["min"]))
+                rcol4.metric("최고", _format_yen(rent_stats["max"]))
+                st.caption(f"※ 월세 정보가 표준 제목 형식인 {rent_stats['count']}건 기준")
+            else:
+                st.caption("월세 정보 추출 가능한 매물 없음")
+
+            # 4) 구별·노선별·역별 분포 (3열)
+            d_col1, d_col2, d_col3 = st.columns(3)
+            with d_col1:
+                st.markdown("**🏷 구별 분포**")
+                by_ward = _aggregate_by_ward(history)
+                if by_ward:
+                    for ward, cnt in list(by_ward.items())[:10]:
+                        bar = "▓" * min(cnt, 20)
+                        st.markdown(f"`{ward[:8]:<10}` {bar} **{cnt}건**")
+                else:
+                    st.caption("데이터 없음")
+
+            with d_col2:
+                st.markdown("**🚆 노선 TOP 10**")
+                by_line = _aggregate_by_line(history, 10)
+                if by_line:
+                    for line, cnt in by_line.items():
+                        bar = "▓" * min(cnt, 20)
+                        st.markdown(f"`{line[:10]:<12}` {bar} **{cnt}건**")
+                else:
+                    st.caption("데이터 없음")
+
+            with d_col3:
+                st.markdown("**🚉 역 TOP 10**")
+                by_station = _aggregate_by_station(history, 10)
+                if by_station:
+                    for station, cnt in by_station.items():
+                        bar = "▓" * min(cnt, 20)
+                        st.markdown(f"`{station[:8]:<10}` {bar} **{cnt}건**")
+                else:
+                    st.caption("데이터 없음")
+
+        # ===== 🗑 이력 정리 (오래된 이력 일괄 삭제) =====
+        with st.expander("🗑 N개월 이상 된 이력 일괄 정리 (즐겨찾기 보호)", expanded=False):
+            st.caption("💡 즐겨찾기(⭐)로 표시된 매물은 삭제되지 않습니다.")
+            cleanup_col1, cleanup_col2 = st.columns([3, 1])
+            with cleanup_col1:
+                months_to_clean = st.slider(
+                    "몇 개월 이상 된 이력을 삭제할까요?",
+                    min_value=1,
+                    max_value=24,
+                    value=12,
+                    step=1,
+                    key="cleanup_months_slider",
+                )
+            with cleanup_col2:
+                st.markdown("&nbsp;", unsafe_allow_html=True)  # 위아래 정렬용
+                confirm_key = f"_confirm_cleanup_{months_to_clean}"
+                if st.button(
+                    f"🗑 {months_to_clean}개월+ 삭제",
+                    type="secondary",
+                    use_container_width=True,
+                    key=f"cleanup_btn_{months_to_clean}",
+                ):
+                    if st.session_state.get(confirm_key):
+                        deleted = delete_old_history(months_to_clean)
+                        st.session_state.pop(confirm_key, None)
+                        st.success(f"✅ {deleted}건의 오래된 이력 삭제 완료 (즐겨찾기 보호됨)")
+                        st.rerun()
+                    else:
+                        st.session_state[confirm_key] = True
+                        st.warning("⚠️ 한 번 더 클릭하면 삭제됩니다.")
+
+        # ===== 📥 Excel 리포트 다운로드 =====
+        with st.expander("📥 Excel 리포트 다운로드 (전체 이력 + 통계)", expanded=False):
+            st.caption("💡 매물 이력 전체 + 통계 요약을 Excel 파일로 다운로드합니다.")
+            try:
+                excel_bytes = _build_excel_report(history)
+                if excel_bytes:
+                    st.download_button(
+                        f"📊 Excel 리포트 다운로드 ({len(history)}건)",
+                        excel_bytes,
+                        file_name=f"JRE_매물이력_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                    )
+                else:
+                    st.warning("⚠️ Excel 생성 라이브러리(openpyxl)가 설치되지 않았습니다.")
+            except Exception as e:
+                st.error(f"Excel 생성 실패: {e}")
+
+        st.divider()
+
         # 검색
         search_q = st.text_input(
             "🔍 검색 (제목·파일명)",
@@ -420,15 +748,24 @@ with st.expander(_expander_label, expanded=False):
             placeholder="예: 신주쿠, 1K, japanreal2_1.jpg",
         )
 
+        # ⭐ 즐겨찾기 필터
+        only_favorites = st.checkbox(
+            "⭐ 즐겨찾기만 보기",
+            key="hist_only_favorites_v2",
+            value=False,
+        )
+
         # 필터링
         filtered = history
         if search_q:
             q = search_q.lower()
             filtered = [
-                h for h in history
+                h for h in filtered
                 if q in h.get("title", "").lower()
                 or q in h.get("filename", "").lower()
             ]
+        if only_favorites:
+            filtered = [h for h in filtered if h.get("favorite")]
 
         if not filtered:
             st.warning(f"'{search_q}' 검색 결과 없음")
@@ -457,6 +794,7 @@ with st.expander(_expander_label, expanded=False):
                 title = h.get("title", "(제목 없음)")
                 filename = h.get("filename", "")
                 timestamp = h.get("timestamp", "")
+                is_fav = h.get("favorite", False)
 
                 # 표시용 시간 포맷
                 try:
@@ -468,8 +806,8 @@ with st.expander(_expander_label, expanded=False):
                     ts_display = timestamp
                     retention_warn = ""
 
-                # 체크박스 + 제목
-                col_chk, col_info = st.columns([0.5, 9])
+                # 체크박스 + 즐겨찾기 + 제목
+                col_chk, col_fav, col_info = st.columns([0.5, 0.5, 9])
                 with col_chk:
                     checked = st.checkbox(
                         " ",
@@ -479,9 +817,21 @@ with st.expander(_expander_label, expanded=False):
                     if checked:
                         selected_ids.append(hid)
 
+                with col_fav:
+                    fav_icon = "⭐" if is_fav else "☆"
+                    if st.button(
+                        fav_icon,
+                        key=f"hist_fav_{hid}",
+                        help="즐겨찾기 토글",
+                        use_container_width=True,
+                    ):
+                        toggle_favorite(hid)
+                        st.rerun()
+
                 with col_info:
+                    fav_badge = " ⭐" if is_fav else ""
                     st.markdown(
-                        f"**{idx+1}. {title}**  \n"
+                        f"**{idx+1}. {title}**{fav_badge}  \n"
                         f"<span style='color:#888;font-size:13px'>"
                         f"📁 {filename} · 🕒 {ts_display}{retention_warn}</span>",
                         unsafe_allow_html=True,
