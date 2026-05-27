@@ -52,10 +52,6 @@ from src.persistence import (
     cleanup_old_sessions,
     generate_session_id,
     HISTORY_RETENTION_DAYS,
-    save_naver_tokens,
-    load_naver_tokens,
-    clear_naver_tokens,
-    is_gist_enabled,
 )
 
 # ─────────────────────────────────────────────────
@@ -812,13 +808,6 @@ with tab4:
         st.stop()
 
     # ─── 카페 클라이언트 준비 ───
-    # ⭐ session_state에 토큰 없으면 Gist에서 자동 복원 시도
-    if not st.session_state.get("naver_access_token"):
-        gist_access, gist_refresh = load_naver_tokens()
-        if gist_access and gist_refresh:
-            st.session_state["naver_access_token"] = gist_access
-            st.session_state["naver_refresh_token"] = gist_refresh
-
     try:
         client = NaverCafeClient(
             client_id=naver_client_id,
@@ -841,8 +830,6 @@ with tab4:
                 client.exchange_code_for_token(auth_code_in_url)
                 st.session_state["naver_access_token"] = client.access_token
                 st.session_state["naver_refresh_token"] = client.refresh_token
-                # ⭐ Gist에도 영구 저장 (슬립 후에도 보존)
-                save_naver_tokens(client.access_token, client.refresh_token)
                 # ?code= 제거 (auth 토큰은 유지)
                 params = dict(st.query_params)
                 params.pop("code", None)
@@ -850,7 +837,7 @@ with tab4:
                 st.query_params.clear()
                 for k, v in params.items():
                     st.query_params[k] = v
-                st.success("✅ 네이버 인증 완료! (영구 저장됨, 슬립 후에도 유지)")
+                st.success("✅ 네이버 인증 완료! 이제 카페에 발행할 수 있습니다.")
                 st.rerun()
             except Exception as e:
                 st.error(f"❌ 인증 실패: {format_publish_error_korean(e)}")
@@ -898,7 +885,6 @@ with tab4:
         if st.button("🔓 인증 해제 (재인증)"):
             st.session_state.pop("naver_access_token", None)
             st.session_state.pop("naver_refresh_token", None)
-            clear_naver_tokens()  # Gist에서도 삭제
             st.rerun()
 
     st.markdown("---")
@@ -1240,38 +1226,10 @@ with tab5:
 # ───── Tab 6: 📚 이력 보관함 ─────
 with tab6:
     st.subheader("📚 작업 이력 보관함")
-
-    # ⭐ Gist 상태 진단 — 디버깅 정보 표시 (임시)
-    with st.expander("🔧 저장소 상태 진단 (디버그)", expanded=False):
-        try:
-            from src.gist_storage import get_last_error, is_available
-            token_set = bool(os.getenv("GITHUB_TOKEN", "").strip())
-            st.write(f"- GITHUB_TOKEN 설정 여부: {'✅ 있음' if token_set else '❌ 없음'}")
-            if token_set:
-                tok = os.getenv("GITHUB_TOKEN", "").strip()
-                st.write(f"- 토큰 시작: `{tok[:15]}...`")
-                st.write(f"- 토큰 길이: {len(tok)}자")
-            st.write(f"- Gist 사용 가능: {'✅ Yes' if is_available() else '❌ No'}")
-            last_err = get_last_error()
-            if last_err:
-                st.error(f"마지막 에러: {last_err}")
-        except Exception as e:
-            st.error(f"진단 실패: {e}")
-
-    # ⭐ Gist 사용 가능 여부에 따라 안내 분기
-    if is_gist_enabled():
-        st.caption(
-            "💡 생성된 모든 블로그가 자동 저장됩니다. "
-            "**영구 보존** — 수동 삭제 전까지 안 사라집니다. "
-            "🌐 GitHub Gist에 안전하게 저장 중 (슬립 후에도 유지)."
-        )
-    else:
-        st.caption(
-            "💡 생성된 모든 블로그가 자동 저장됩니다. "
-            "**영구 보존** — 수동 삭제 전까지 안 사라집니다.\n\n"
-            "⚠️ GITHUB_TOKEN 미설정 또는 유효하지 않음 — 임시 저장 모드. "
-            "위의 '저장소 상태 진단'에서 원인을 확인하세요."
-        )
+    st.caption(
+        "💡 생성된 모든 블로그가 자동 저장됩니다. "
+        "**영구 보존** — 수동 삭제 전까지 안 사라집니다."
+    )
 
     # 이력 로드 (실패해도 빈 리스트 반환)
     try:
