@@ -37,6 +37,8 @@ from src.generator import (
     VISA_LABELS,
     build_naver_smarteditor_html,
     generate_blog_post,
+    generate_sns_content,
+    format_sns_for_display,
     list_available_styles,
 )
 from src.naver_publisher import NaverCafeClient, format_publish_error_korean
@@ -922,6 +924,249 @@ with st.expander(_expander_label, expanded=False):
                         mime="application/json",
                         use_container_width=True,
                     )
+
+
+# ───── 📱 SNS·쇼츠 콘텐츠 자동 생성 (메인 페이지 상단 expander) ─────
+# 5번 탭이 아니라 expander로 만들어 Streamlit st.tabs() 마지막 탭 버그 회피.
+# 결과 표시는 라디오 버튼으로 (중첩 st.tabs 회피).
+# 결과는 session_state에만 저장 (페이지 새로고침 시 사라짐).
+_sns_blog_posts = st.session_state.get("blog_posts") or []
+_sns_label_count = f"({len(_sns_blog_posts)}개 매물 준비)" if _sns_blog_posts else "(블로그 미생성)"
+_sns_expander_label = f"📱 SNS·쇼츠 콘텐츠 자동 생성 {_sns_label_count} (클릭하여 펼치기)"
+
+with st.expander(_sns_expander_label, expanded=False):
+    st.caption(
+        "💡 블로그 생성된 매물을 바탕으로 **인스타 캡션·카톡 메시지·유튜브 쇼츠 스크립트**를 "
+        "자동 생성합니다."
+    )
+
+    # ⚠️ 비용 안내 강화 — 예상 비용 표시
+    if _sns_blog_posts:
+        expected_cost = len(_sns_blog_posts) * 240
+        st.warning(
+            f"💰 **예상 비용**: 매물당 약 240원 (Opus 기준) · "
+            f"현재 {len(_sns_blog_posts)}건 모두 생성 시 약 **{expected_cost:,}원**"
+        )
+
+    if not _sns_blog_posts:
+        st.info(
+            "👈 먼저 **1·2번 탭**에서 매물을 분석하고 블로그를 생성하세요.\n\n"
+            "블로그 생성된 매물만 SNS 콘텐츠 생성 가능합니다."
+        )
+    else:
+        # SNS 콘텐츠는 별도 session_state에 저장 (블로그와 분리)
+        if "sns_contents" not in st.session_state:
+            st.session_state["sns_contents"] = {}
+
+        sns_contents = st.session_state["sns_contents"]
+
+        # 일괄 생성 버튼
+        not_yet = [
+            (idx, bp) for idx, bp in enumerate(_sns_blog_posts)
+            if f"{bp['filename']}_{idx}" not in sns_contents
+        ]
+
+        st.markdown("### ⚡ 한꺼번에 생성")
+        if not not_yet:
+            st.success("✅ 모든 매물의 SNS 콘텐츠가 이미 생성되었습니다.")
+        else:
+            batch_cost = len(not_yet) * 240
+            if st.button(
+                f"🚀 미생성 {len(not_yet)}개 매물 SNS 생성 (예상 비용 {batch_cost:,}원)",
+                type="primary",
+                use_container_width=True,
+                key="sns_batch_generate_btn",
+            ):
+                progress = st.progress(0.0, text="시작...")
+                total = len(not_yet)
+                gen_errors = []
+
+                for i, (idx, bp) in enumerate(not_yet):
+                    filename = bp["filename"]
+                    title = bp["post"].get("title", filename)
+                    progress.progress(
+                        i / total,
+                        text=f"[{i+1}/{total}] '{title[:30]}...' SNS 생성 중",
+                    )
+                    try:
+                        sns_result = generate_sns_content(
+                            property_data=bp["data"],
+                            blog_post=bp["post"],
+                            model=model,
+                        )
+                        sns_key = f"{filename}_{idx}"
+                        sns_contents[sns_key] = sns_result
+                    except Exception as e:
+                        gen_errors.append({
+                            "title": title,
+                            "error": format_error_korean(e, filename),
+                        })
+
+                progress.progress(1.0, text="✅ 완료")
+                st.session_state["sns_contents"] = sns_contents
+
+                if gen_errors:
+                    st.warning(f"⚠️ {len(gen_errors)}개 매물 SNS 생성 실패")
+                    for ge in gen_errors:
+                        st.markdown(f"- **{ge['title']}**: {ge['error']}")
+
+                st.success(f"✅ {total - len(gen_errors)}개 매물 SNS 콘텐츠 생성 완료!")
+                st.rerun()
+
+        st.divider()
+        st.markdown("### 📋 매물별 SNS 콘텐츠")
+        st.caption("각 매물마다 개별 생성도 가능합니다. 생성된 결과는 라디오로 채널 전환.")
+
+        # 매물 목록 표시
+        for idx, bp in enumerate(_sns_blog_posts):
+            post = bp["post"]
+            filename = bp["filename"]
+            title = post.get("title", filename)
+            sns_key = f"{filename}_{idx}"
+            has_sns = sns_key in sns_contents
+
+            # 각 매물은 expander (중첩 expander - 작업 이력 보관함과 같은 패턴)
+            label_icon = "✅" if has_sns else "⏳"
+            label_status = "생성됨" if has_sns else "미생성"
+            with st.expander(
+                f"{label_icon} **{idx+1}. {title}**  ({label_status})",
+                expanded=False,
+            ):
+                col_a, col_b = st.columns([3, 1])
+                with col_a:
+                    st.caption(f"📁 {filename}")
+                with col_b:
+                    if not has_sns:
+                        if st.button(
+                            "🎬 SNS 생성 (240원)",
+                            key=f"sns_gen_one_{sns_key}",
+                            type="primary",
+                            use_container_width=True,
+                        ):
+                            try:
+                                with st.spinner("SNS 콘텐츠 생성 중..."):
+                                    sns_result = generate_sns_content(
+                                        property_data=bp["data"],
+                                        blog_post=post,
+                                        model=model,
+                                    )
+                                    sns_contents[sns_key] = sns_result
+                                    st.session_state["sns_contents"] = sns_contents
+                                st.success("✅ 생성 완료!")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"❌ 생성 실패: {format_error_korean(e, filename)}")
+
+                # 생성된 결과 표시 — 라디오 버튼으로 채널 전환 (st.tabs 회피)
+                if has_sns:
+                    sns_data = sns_contents[sns_key]
+                    formatted = format_sns_for_display(sns_data)
+
+                    # ⭐ 라디오 버튼으로 채널 선택 (중첩 st.tabs 회피 = 빈 화면 버그 없음)
+                    channel = st.radio(
+                        "콘텐츠 채널 선택:",
+                        options=["📸 인스타그램", "💬 카카오톡", "🎬 유튜브 쇼츠"],
+                        key=f"sns_channel_{sns_key}",
+                        horizontal=True,
+                        label_visibility="collapsed",
+                    )
+
+                    # ─── 인스타그램 ───
+                    if channel == "📸 인스타그램":
+                        st.markdown("**📸 인스타그램 피드 캡션**")
+                        st.code(
+                            sns_data.get("instagram_caption", ""),
+                            language=None,
+                            wrap_lines=True,
+                        )
+
+                        st.markdown("**#️⃣ 해시태그**")
+                        tags = sns_data.get("instagram_hashtags", [])
+                        st.code(" ".join(tags), language=None, wrap_lines=True)
+
+                        st.markdown("**📋 전체 (캡션 + 해시태그) — 한 번에 복사**")
+                        st.code(
+                            formatted["instagram_full"],
+                            language=None,
+                            wrap_lines=True,
+                        )
+
+                        st.download_button(
+                            "💾 인스타용 텍스트 다운로드",
+                            formatted["instagram_full"],
+                            file_name=f"instagram_{Path(filename).stem}.txt",
+                            mime="text/plain",
+                            key=f"sns_dl_insta_{sns_key}",
+                        )
+
+                    # ─── 카카오톡 ───
+                    elif channel == "💬 카카오톡":
+                        st.markdown("**💬 카카오톡 오픈채팅용 메시지**")
+                        st.caption(
+                            "💡 운영 중인 오픈채팅방에 그대로 복사·전송 가능. "
+                            "짧고 정보 위주의 톤으로 작성됨."
+                        )
+                        st.code(
+                            formatted["kakao"],
+                            language=None,
+                            wrap_lines=True,
+                        )
+
+                        st.download_button(
+                            "💾 카톡용 텍스트 다운로드",
+                            formatted["kakao"],
+                            file_name=f"kakao_{Path(filename).stem}.txt",
+                            mime="text/plain",
+                            key=f"sns_dl_kakao_{sns_key}",
+                        )
+
+                    # ─── 유튜브 쇼츠 ───
+                    elif channel == "🎬 유튜브 쇼츠":
+                        st.markdown("**🎬 유튜브 쇼츠 60초 스크립트**")
+                        st.caption(
+                            "💡 영상 편집 시 자막·나레이션·시간 배분 그대로 활용 가능."
+                        )
+
+                        st.code(
+                            formatted["youtube_full"],
+                            language=None,
+                            wrap_lines=True,
+                        )
+
+                        st.markdown("**📝 자막만 (영상 편집용)**")
+                        st.caption(
+                            "CapCut 등 영상 편집 앱에서 자막으로 그대로 사용 가능."
+                        )
+                        st.code(
+                            formatted["youtube_subtitles_only"],
+                            language=None,
+                            wrap_lines=True,
+                        )
+
+                        col_dl1, col_dl2 = st.columns(2)
+                        with col_dl1:
+                            st.download_button(
+                                "💾 전체 스크립트",
+                                formatted["youtube_full"],
+                                file_name=f"shorts_full_{Path(filename).stem}.txt",
+                                mime="text/plain",
+                                key=f"sns_dl_yt_full_{sns_key}",
+                                use_container_width=True,
+                            )
+                        with col_dl2:
+                            st.download_button(
+                                "💾 자막만",
+                                formatted["youtube_subtitles_only"],
+                                file_name=f"shorts_subtitles_{Path(filename).stem}.txt",
+                                mime="text/plain",
+                                key=f"sns_dl_yt_sub_{sns_key}",
+                                use_container_width=True,
+                            )
+
+        st.caption(
+            "⚠️ **주의**: SNS 콘텐츠는 페이지 새로고침 시 사라집니다. "
+            "필요한 내용은 즉시 다운로드하거나 복사하세요."
+        )
 
 
 tab1, tab2, tab3, tab4 = st.tabs(
