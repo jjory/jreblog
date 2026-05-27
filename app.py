@@ -1241,6 +1241,23 @@ with tab5:
 with tab6:
     st.subheader("📚 작업 이력 보관함")
 
+    # ⭐ Gist 상태 진단 — 디버깅 정보 표시 (임시)
+    with st.expander("🔧 저장소 상태 진단 (디버그)", expanded=False):
+        try:
+            from src.gist_storage import get_last_error, is_available
+            token_set = bool(os.getenv("GITHUB_TOKEN", "").strip())
+            st.write(f"- GITHUB_TOKEN 설정 여부: {'✅ 있음' if token_set else '❌ 없음'}")
+            if token_set:
+                tok = os.getenv("GITHUB_TOKEN", "").strip()
+                st.write(f"- 토큰 시작: `{tok[:15]}...`")
+                st.write(f"- 토큰 길이: {len(tok)}자")
+            st.write(f"- Gist 사용 가능: {'✅ Yes' if is_available() else '❌ No'}")
+            last_err = get_last_error()
+            if last_err:
+                st.error(f"마지막 에러: {last_err}")
+        except Exception as e:
+            st.error(f"진단 실패: {e}")
+
     # ⭐ Gist 사용 가능 여부에 따라 안내 분기
     if is_gist_enabled():
         st.caption(
@@ -1252,11 +1269,16 @@ with tab6:
         st.caption(
             "💡 생성된 모든 블로그가 자동 저장됩니다. "
             "**영구 보존** — 수동 삭제 전까지 안 사라집니다.\n\n"
-            "⚠️ GITHUB_TOKEN 미설정 — 임시 저장 모드 (Streamlit 슬립 시 사라질 수 있음). "
-            "영구 보존을 원하시면 Streamlit Secrets에 GITHUB_TOKEN 추가하세요."
+            "⚠️ GITHUB_TOKEN 미설정 또는 유효하지 않음 — 임시 저장 모드. "
+            "위의 '저장소 상태 진단'에서 원인을 확인하세요."
         )
 
-    history = load_history()
+    # 이력 로드 (실패해도 빈 리스트 반환)
+    try:
+        history = load_history()
+    except Exception as e:
+        st.error(f"⚠️ 이력 로드 중 에러: {e}")
+        history = []
 
     if not history:
         st.info(
