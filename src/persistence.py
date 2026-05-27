@@ -1,16 +1,15 @@
 """
 persistence.py
 ─────────────────────────────────────────────────────────
-영구 데이터 저장소.
+서버 디스크 기반 데이터 영속화 모듈 (단순 안정 버전).
 
-저장 계층 (우선순위):
-1. GitHub Gist (영구, 슬립·재배포 와도 살아남음) ⭐ 주 저장소
-2. /tmp/jre_data (백업, 빠른 접근)
+저장 위치:
+- /tmp/jre_data/history.json     # 이력 (수동 삭제만, 영구 보존)
+- /tmp/jre_data/session_<id>.json # 임시 세션 (24시간 retention)
 
-이력 정책: 수동 삭제 전까지 영구 보존 (자동 삭제 없음)
-세션 정책: 24시간 retention (현재 진행 중인 작업)
-
-GITHUB_TOKEN 미설정 시 /tmp만 사용 (옛 동작).
+주의:
+- Streamlit Cloud reboot 시 /tmp 데이터 사라질 수 있음
+- 일반 새로고침에는 유지됨
 """
 
 import json
@@ -25,11 +24,9 @@ from typing import Optional
 STORAGE_DIR = Path("/tmp/jre_data")
 HISTORY_FILE = STORAGE_DIR / "history.json"
 
-# ⭐ 이력 자동 삭제 안 함 — 영구 보존 (수동 삭제만)
-SESSION_RETENTION_HOURS = 24       # 임시 세션 보관 기간 (이건 자동 삭제 OK)
-MAX_HISTORY_ITEMS = 1000           # 이력 최대 개수 (메모리 보호)
-
-# 표시용 (기존 코드와의 호환성)
+# 영구 보존 (수동 삭제만)
+SESSION_RETENTION_HOURS = 24
+MAX_HISTORY_ITEMS = 1000
 HISTORY_RETENTION_DAYS = -1  # -1 = 영구 보존
 
 
@@ -60,29 +57,11 @@ def _safe_write_json(path: Path, data) -> bool:
         return False
 
 
-def _get_gist_storage():
-    """GitHub Gist 저장소 (있으면)."""
-    try:
-        from src.gist_storage import get_storage
-        return get_storage()
-    except ImportError:
-        return None
-
-
 # ─────────────────────────────────────────────────
 # 작업 이력 (영구 저장)
 # ─────────────────────────────────────────────────
 def load_history() -> list:
-    """이력 로드. Gist 우선, /tmp 폴백. 자동 삭제 없음."""
-    gist = _get_gist_storage()
-    if gist:
-        try:
-            history = gist.load_history()
-            _safe_write_json(HISTORY_FILE, history)  # /tmp 캐시 동기화
-            return history
-        except Exception:
-            pass
-
+    """이력 로드. 자동 삭제 없음."""
     data = _safe_read_json(HISTORY_FILE)
     if data is None or not isinstance(data, list):
         return []
@@ -90,7 +69,6 @@ def load_history() -> list:
 
 
 def add_to_history(items: list) -> int:
-    """이력 추가. Gist + /tmp 동시 저장."""
     if not items:
         return 0
 
@@ -106,20 +84,11 @@ def add_to_history(items: list) -> int:
     history = items + history
     history = history[:MAX_HISTORY_ITEMS]
 
-    # Gist 우선 저장
-    gist = _get_gist_storage()
-    if gist:
-        try:
-            gist.save_history(history)
-        except Exception:
-            pass
-
     _safe_write_json(HISTORY_FILE, history)
     return len(history)
 
 
 def delete_from_history(ids: list) -> int:
-    """선택 항목 삭제. Gist + /tmp 동기화."""
     if not ids:
         return len(load_history())
 
@@ -127,76 +96,16 @@ def delete_from_history(ids: list) -> int:
     id_set = set(ids)
     filtered = [h for h in history if h.get("id") not in id_set]
 
-    gist = _get_gist_storage()
-    if gist:
-        try:
-            gist.save_history(filtered)
-        except Exception:
-            pass
-
     _safe_write_json(HISTORY_FILE, filtered)
     return len(filtered)
 
 
 def clear_history() -> bool:
-    """전체 이력 삭제."""
-    gist = _get_gist_storage()
-    if gist:
-        try:
-            gist.save_history([])
-        except Exception:
-            pass
     return _safe_write_json(HISTORY_FILE, [])
 
 
 # ─────────────────────────────────────────────────
-# OAuth 토큰 (네이버 — 영구 저장)
-# ─────────────────────────────────────────────────
-def save_naver_tokens(access_token: str, refresh_token: str) -> bool:
-    """네이버 OAuth 토큰을 Gist에 영구 저장."""
-    gist = _get_gist_storage()
-    if not gist:
-        return False
-    try:
-        return gist.save_tokens({
-            "naver_access_token": access_token,
-            "naver_refresh_token": refresh_token,
-            "saved_at": datetime.now().isoformat(timespec="seconds"),
-        })
-    except Exception:
-        return False
-
-
-def load_naver_tokens():
-    """저장된 네이버 토큰 로드. (access_token, refresh_token) 또는 (None, None)."""
-    gist = _get_gist_storage()
-    if not gist:
-        return (None, None)
-    try:
-        tokens = gist.load_tokens()
-        return (
-            tokens.get("naver_access_token"),
-            tokens.get("naver_refresh_token"),
-        )
-    except Exception:
-        return (None, None)
-
-
-def clear_naver_tokens() -> bool:
-    """저장된 네이버 토큰 삭제 (재인증 필요)."""
-    gist = _get_gist_storage()
-    if not gist:
-        return False
-    try:
-        gist.delete_token("naver_access_token")
-        gist.delete_token("naver_refresh_token")
-        return True
-    except Exception:
-        return False
-
-
-# ─────────────────────────────────────────────────
-# 임시 세션 (현재 작업, 24시간 retention)
+# 임시 세션 (24시간 retention)
 # ─────────────────────────────────────────────────
 def save_session(session_id: str, data: dict) -> bool:
     if not session_id:
@@ -251,8 +160,3 @@ def cleanup_old_sessions():
 
 def generate_session_id() -> str:
     return secrets.token_urlsafe(12)
-
-
-def is_gist_enabled() -> bool:
-    """Gist 저장소 사용 중인지 확인."""
-    return _get_gist_storage() is not None
