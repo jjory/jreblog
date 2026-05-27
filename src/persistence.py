@@ -23,6 +23,10 @@ from typing import Optional
 
 STORAGE_DIR = Path("/tmp/jre_data")
 HISTORY_FILE = STORAGE_DIR / "history.json"
+USERS_FILE = STORAGE_DIR / "users.json"
+ADMIN_EMAIL = "info@win-bro.com"
+ALLOWED_DOMAIN = "@win-bro.com"
+ADMIN_SETTINGS_FILE = STORAGE_DIR / "admin_settings.json"
 
 # 영구 보존 (수동 삭제만)
 SESSION_RETENTION_HOURS = 24
@@ -68,7 +72,7 @@ def load_history() -> list:
     return data
 
 
-def add_to_history(items: list) -> int:
+def add_to_history(items: list, user_email: str = "") -> int:
     if not items:
         return 0
 
@@ -80,6 +84,9 @@ def add_to_history(items: list) -> int:
             item["id"] = secrets.token_urlsafe(8)
         if "timestamp" not in item:
             item["timestamp"] = now_iso
+        # 작성자 이메일 저장 (없으면 빈 문자열)
+        if "user_email" not in item:
+            item["user_email"] = user_email
 
     history = items + history
     history = history[:MAX_HISTORY_ITEMS]
@@ -202,3 +209,171 @@ def cleanup_old_sessions():
 
 def generate_session_id() -> str:
     return secrets.token_urlsafe(12)
+
+
+# ─────────────────────────────────────────────────
+# 사용자 관리 (이메일 + 비밀번호 기반)
+# ─────────────────────────────────────────────────
+def _hash_password(password: str) -> str:
+    """bcrypt 해시 생성 (단방향 암호화)"""
+    import bcrypt
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def _verify_password(password: str, password_hash: str) -> bool:
+    """비밀번호 검증"""
+    import bcrypt
+    try:
+        return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
+    except Exception:
+        return False
+
+
+def is_valid_email(email: str) -> bool:
+    """@win-bro.com 도메인만 허용"""
+    if not email:
+        return False
+    email = email.strip().lower()
+    return email.endswith(ALLOWED_DOMAIN) and len(email) > len(ALLOWED_DOMAIN)
+
+
+def load_users() -> dict:
+    """users.json 로드 (없으면 빈 dict)"""
+    _ensure_dir()
+    data = _safe_read_json(USERS_FILE)
+    if data is None or not isinstance(data, dict):
+        return {}
+    return data
+
+
+def save_users(users: dict) -> bool:
+    """users.json 저장"""
+    _ensure_dir()
+    return _safe_write_json(USERS_FILE, users)
+
+
+def init_admin_if_needed(initial_password: str) -> bool:
+    """관리자 계정 초기화 (없으면 생성). 이미 있으면 변경 안 함."""
+    if not initial_password:
+        return False
+    users = load_users()
+    if ADMIN_EMAIL in users:
+        return False  # 이미 있음
+    users[ADMIN_EMAIL] = {
+        "role": "admin",
+        "password_hash": _hash_password(initial_password),
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "created_by": "system",
+        "last_login": "",
+    }
+    save_users(users)
+    return True
+
+
+def authenticate_user(email: str, password: str) -> Optional[dict]:
+    """로그인 인증. 성공 시 사용자 정보 반환, 실패 시 None."""
+    if not email or not password:
+        return None
+    email = email.strip().lower()
+    users = load_users()
+    user = users.get(email)
+    if not user:
+        return None
+    if not _verify_password(password, user.get("password_hash", "")):
+        return None
+    # 마지막 로그인 시간 업데이트
+    user["last_login"] = datetime.now().isoformat(timespec="seconds")
+    users[email] = user
+    save_users(users)
+    return {"email": email, **user, "password_hash": ""}  # 해시는 반환 안 함
+
+
+def add_user(email: str, password: str, created_by: str) -> tuple:
+    """새 사용자 추가. 반환: (성공 여부, 메시지)"""
+    if not is_valid_email(email):
+        return False, f"이메일은 {ALLOWED_DOMAIN} 도메인만 사용 가능합니다."
+    email = email.strip().lower()
+    if not password or len(password) < 4:
+        return False, "비밀번호는 최소 4자 이상이어야 합니다."
+
+    users = load_users()
+    if email in users:
+        return False, "이미 등록된 이메일입니다."
+
+    users[email] = {
+        "role": "user",  # 일반 사용자 (admin은 init 시에만 생성)
+        "password_hash": _hash_password(password),
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "created_by": created_by,
+        "last_login": "",
+    }
+    save_users(users)
+    return True, f"사용자 {email} 추가 완료"
+
+
+def delete_user(email: str) -> tuple:
+    """사용자 삭제. 관리자(info@win-bro.com)는 삭제 불가."""
+    email = email.strip().lower()
+    if email == ADMIN_EMAIL:
+        return False, "관리자 계정은 삭제할 수 없습니다."
+    users = load_users()
+    if email not in users:
+        return False, "존재하지 않는 사용자입니다."
+    del users[email]
+    save_users(users)
+    return True, f"사용자 {email} 삭제 완료"
+
+
+def change_password(email: str, new_password: str) -> tuple:
+    """비밀번호 변경"""
+    if not new_password or len(new_password) < 4:
+        return False, "비밀번호는 최소 4자 이상이어야 합니다."
+    email = email.strip().lower()
+    users = load_users()
+    if email not in users:
+        return False, "존재하지 않는 사용자입니다."
+    users[email]["password_hash"] = _hash_password(new_password)
+    save_users(users)
+    return True, f"비밀번호 변경 완료"
+
+
+def list_users() -> list:
+    """모든 사용자 목록 (비밀번호 해시는 제외)"""
+    users = load_users()
+    result = []
+    for email, info in users.items():
+        result.append({
+            "email": email,
+            "role": info.get("role", "user"),
+            "created_at": info.get("created_at", ""),
+            "created_by": info.get("created_by", ""),
+            "last_login": info.get("last_login", ""),
+        })
+    # 관리자 먼저, 그 다음 이름순
+    result.sort(key=lambda x: (x["role"] != "admin", x["email"]))
+    return result
+
+
+# ─────────────────────────────────────────────────
+# 관리자 전역 설정 (모든 사용자에게 반영)
+# ─────────────────────────────────────────────────
+def load_admin_settings() -> dict:
+    """관리자가 설정한 분석 엔진·AI 모델 기본값"""
+    _ensure_dir()
+    data = _safe_read_json(ADMIN_SETTINGS_FILE)
+    if data is None or not isinstance(data, dict):
+        return {
+            "engine": "hybrid",
+            "model": "claude-opus-4-7",
+        }
+    return data
+
+
+def save_admin_settings(engine: str, model: str) -> bool:
+    """관리자만 호출 가능. 모든 사용자가 이 설정을 사용함."""
+    _ensure_dir()
+    return _safe_write_json(ADMIN_SETTINGS_FILE, {
+        "engine": engine,
+        "model": model,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    })
