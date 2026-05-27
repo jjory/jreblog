@@ -326,6 +326,145 @@ def _ensure_table_styles(html: str) -> str:
     return html
 
 
+def _extract_ward_from_address(address: str) -> str:
+    """
+    일본 주소에서 구(区) 또는 시(市) 부분을 추출.
+
+    예시:
+    - "東京都新宿区西新宿2-1-1" → "신주쿠구"
+    - "東京都板橋区成増2-3-4" → "이타바시구"
+    - "東京都渋谷区道玄坂1-2-3" → "시부야구"
+    - "千葉県千葉市美浜区..." → "지바시 미하마구"
+    - 추출 실패 → ""
+    """
+    if not address:
+        return ""
+
+    # 일본어 → 한국어 매핑 (주요 도쿄 23구 + 인근)
+    ward_map = {
+        # 도쿄 23구
+        "千代田区": "지요다구",
+        "中央区": "주오구",
+        "港区": "미나토구",
+        "新宿区": "신주쿠구",
+        "文京区": "분쿄구",
+        "台東区": "다이토구",
+        "墨田区": "스미다구",
+        "江東区": "고토구",
+        "品川区": "시나가와구",
+        "目黒区": "메구로구",
+        "大田区": "오타구",
+        "世田谷区": "세타가야구",
+        "渋谷区": "시부야구",
+        "中野区": "나카노구",
+        "杉並区": "스기나미구",
+        "豊島区": "도시마구",
+        "北区": "기타구",
+        "荒川区": "아라카와구",
+        "板橋区": "이타바시구",
+        "練馬区": "네리마구",
+        "足立区": "아다치구",
+        "葛飾区": "가쓰시카구",
+        "江戸川区": "에도가와구",
+        # 인근 주요 도시
+        "横浜市": "요코하마시",
+        "川崎市": "가와사키시",
+        "千葉市": "지바시",
+        "さいたま市": "사이타마시",
+        "船橋市": "후나바시시",
+        "市川市": "이치카와시",
+        "松戸市": "마쓰도시",
+        "柏市": "가시와시",
+    }
+
+    # 주소에서 매핑 키워드 찾기 (긴 키워드 우선 매칭)
+    for jp, kr in sorted(ward_map.items(), key=lambda x: -len(x[0])):
+        if jp in address:
+            return kr
+
+    # 매핑 실패 시 일반 패턴 추출 시도
+    # "OO区" 또는 "OO市" 패턴 찾기
+    ward_match = re.search(r"([一-龥ぁ-んァ-ヶ]+[区市町村])", address)
+    if ward_match:
+        return ward_match.group(1)  # 일본어 그대로
+
+    return ""
+
+
+def _build_standard_title(property_data: dict) -> str:
+    """
+    매물 정보로부터 표준 형식의 블로그 제목 생성.
+
+    형식:
+    [지역] [노선] [역]역 도보 [분]분 [방구조] 월세 ¥[금액]+관리비 ¥[금액]
+
+    예시:
+    - 이타바시구 도부토조선 나리마스역 도보 5분 1K 월세 ¥71,000+관리비 ¥3,000
+    - 신주쿠구 JR 야마노테선 신주쿠역 도보 3분 1R 월세 ¥88,000+관리비 ¥5,000
+
+    데이터가 부족하면 가능한 부분만 채워 자연스럽게 생성.
+    """
+    parts = []
+
+    # 1. 지역 (구/시)
+    address = property_data.get("address") or ""
+    ward = _extract_ward_from_address(address)
+    if ward:
+        parts.append(ward)
+
+    # 2. 노선 + 역 + 도보
+    station = property_data.get("nearest_station") or {}
+    line = (station.get("line") or "").strip()
+    station_name = (station.get("station") or "").strip()
+    walk_min = station.get("walk_minutes")
+
+    # 노선 + 역명 결합
+    if line and station_name:
+        parts.append(f"{line} {station_name}역")
+    elif station_name:
+        parts.append(f"{station_name}역")
+
+    # 도보 시간
+    if walk_min is not None:
+        try:
+            walk_n = int(walk_min)
+            parts.append(f"도보 {walk_n}분")
+        except (ValueError, TypeError):
+            pass
+
+    # 3. 방구조
+    layout = (property_data.get("layout") or "").strip()
+    if layout:
+        parts.append(layout)
+
+    # 4. 월세 + 관리비
+    rent = property_data.get("rent_yen")
+    mgmt = property_data.get("management_fee_yen")
+
+    if rent:
+        try:
+            rent_n = int(rent)
+            money_part = f"월세 ¥{rent_n:,}"
+            if mgmt:
+                try:
+                    mgmt_n = int(mgmt)
+                    money_part += f"+관리비 ¥{mgmt_n:,}"
+                except (ValueError, TypeError):
+                    pass
+            parts.append(money_part)
+        except (ValueError, TypeError):
+            pass
+
+    # 부분들을 공백으로 연결
+    title = " ".join(parts)
+
+    # 너무 짧으면 fallback (최소한 방구조라도 있어야)
+    if len(title) < 5:
+        return f"{layout or '신규 매물'} 월세 정보"
+
+    return title
+
+
 def _append_map_link(summary: str, property_data: dict) -> str:
     """
     카카오톡 요약 끝에 구글맵 위치 링크를 자동으로 추가.
@@ -434,12 +573,28 @@ def generate_blog_post(
     last_error = None
     for attempt in range(max_retries):
         try:
+            # Extended Thinking 활성화 - 블로그 품질 향상 (Claude가 더 깊이 사고 후 작성)
+            # budget_tokens 5000 = 충분한 추론 + 합리적 비용
             response = client.messages.create(
                 model=model,
-                max_tokens=8192,
+                max_tokens=16384,  # thinking + 본문을 모두 수용하기 위해 증가
+                thinking={
+                    "type": "enabled",
+                    "budget_tokens": 5000,
+                },
                 messages=[{"role": "user", "content": prompt}],
             )
-            raw_text = response.content[0].text
+
+            # thinking 블록 + text 블록이 모두 있을 수 있음 - text만 추출
+            raw_text = ""
+            for block in response.content:
+                if hasattr(block, "type") and block.type == "text":
+                    raw_text = block.text
+                    break
+                # 일부 SDK는 text 속성을 직접 가짐
+                if hasattr(block, "text") and not raw_text:
+                    raw_text = block.text
+
             result = _extract_blog_json(raw_text)
             _validate_blog(result)
 
@@ -455,6 +610,13 @@ def generate_blog_post(
             # 누락 가능 키 기본값 채우기
             result.setdefault("meta_description", "")
             result.setdefault("summary_for_chat", "")
+
+            # ⭐ 제목을 표준 형식으로 강제 덮어쓰기
+            # 형식: [지역] [노선] [역]역 도보 [분]분 [방구조] 월세 ¥[금액]+관리비 ¥[금액]
+            # AI가 생성한 제목 대신 사장님이 지정한 정확한 표준 형식 사용
+            standard_title = _build_standard_title(property_data)
+            if standard_title:
+                result["title"] = standard_title
 
             # "(현지 확인 필요)" 표시를 빨간색으로 강조 (수동 편집 필요한 부분 시각화)
             if result.get("html_content"):

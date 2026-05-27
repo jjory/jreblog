@@ -353,7 +353,7 @@ def analyze_property_sheet(
             result["extraction_confidence"] = actual
         return result
 
-    # ③ Hybrid: Gemini 우선, 자신도 낮거나 실패 시 Claude
+    # ③ Hybrid: Gemini 우선, 자신도가 high가 아니면 Claude (품질 우선 모드)
     has_gemini_key = bool(gemini_api_key or os.getenv("GEMINI_API_KEY"))
 
     if has_gemini_key:
@@ -362,11 +362,12 @@ def analyze_property_sheet(
             actual_conf = _compute_actual_confidence(gemini_result)
             gemini_result["extraction_confidence"] = actual_conf
 
-            # 자신도가 low가 아니면 Gemini 결과 채택 (무료)
-            if actual_conf != "low":
+            # 자신도가 high면 Gemini 결과 채택 (무료)
+            # low/medium이면 Claude로 재분석 (품질 우선 — 정확도 향상)
+            if actual_conf == "high":
                 gemini_result["_engine_used"] = "gemini"
                 return gemini_result
-            # low면 아래에서 Claude로 재시도
+            # high가 아니면 아래에서 Claude로 재시도
         except Exception:
             # Gemini 실패 → 조용히 Claude로 폴백
             pass
@@ -374,7 +375,7 @@ def analyze_property_sheet(
     # Claude 폴백
     result = _analyze_with_claude(file_path, model, api_key, max_retries)
     if has_gemini_key:
-        result["_engine_used"] = "claude (gemini→claude 폴백)"
+        result["_engine_used"] = "claude (정확도 향상 모드)"
     else:
         result["_engine_used"] = "claude (GEMINI_API_KEY 미설정)"
     return result
