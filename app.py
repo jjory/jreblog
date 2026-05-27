@@ -22,6 +22,7 @@ import io
 import json
 import os
 import re
+import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -764,7 +765,7 @@ with tab2:
             if blog_posts:
                 st.session_state["blog_posts"] = blog_posts
 
-                # ⭐ 디스크에 영구 이력 저장 (10일 retention, 5번 탭에서 조회)
+                # ⭐ 디스크에 영구 이력 저장 (이력 보관함 expander에서 조회)
                 new_history_items = []
                 for bp in blog_posts:
                     post = bp["post"]
@@ -782,9 +783,14 @@ with tab2:
 
                 st.success(
                     f"✅ 블로그 {len(blog_posts)}개 생성 완료! "
-                    f"3번 탭에서 확인하시거나, 5번 탭 '이력 보관함'에서 "
+                    f"3번 탭에서 확인하시거나, 화면 상단 **'📚 작업 이력 보관함'** expander에서 "
                     f"나중에라도 다시 조회할 수 있습니다."
                 )
+                st.balloons()
+
+                # 2초 대기 후 페이지 새로고침 → 이력 보관함 expander 자동 갱신
+                time.sleep(2)
+                st.rerun()
             if errors:
                 st.error("⚠️ 일부 블로그 생성 실패")
                 for err_msg in errors:
@@ -797,7 +803,7 @@ with tab3:
     if not blog_posts:
         st.info(
             "👈 2번 탭에서 블로그 글을 생성하세요.\n\n"
-            "💡 과거에 생성한 블로그 글은 **5번 탭 '이력 보관함'**에서 다시 조회·다운로드 가능합니다."
+            "💡 과거에 생성한 블로그 글은 화면 상단의 **'📚 작업 이력 보관함'** expander에서 다시 조회·다운로드 가능합니다."
         )
     else:
         st.subheader(f"📝 생성된 블로그 — 총 {len(blog_posts)}개")
