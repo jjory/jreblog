@@ -338,13 +338,215 @@ def _generate_worker(property_data, target_visa, style_name, custom_instructions
 # ─────────────────────────────────────────────────
 # 4단계 탭
 # ─────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
+# ───── 작업 이력 보관함 (메인 페이지 상단 expander) ─────
+with st.expander("📚 작업 이력 보관함 (클릭하여 펼치기)", expanded=False):
+    st.caption(
+        "💡 생성된 모든 블로그가 자동 저장됩니다. "
+        "**영구 보존** — 수동 삭제 전까지 안 사라집니다."
+    )
+
+    # 이력 로드 (실패해도 빈 리스트 반환)
+    try:
+        history = load_history()
+    except Exception as e:
+        st.error(f"⚠️ 이력 로드 중 에러: {e}")
+        history = []
+
+    if not history:
+        st.info(
+            "아직 저장된 이력이 없습니다.\n\n"
+            "1·2번 탭에서 블로그를 생성하면 자동으로 여기에 저장됩니다."
+        )
+    else:
+        # 통계 표시
+        col_s1, col_s2, col_s3 = st.columns(3)
+        with col_s1:
+            st.metric("📊 총 이력", f"{len(history)}건")
+        with col_s2:
+            try:
+                latest_ts = datetime.fromisoformat(history[0]["timestamp"])
+                latest_str = latest_ts.strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                latest_str = "?"
+            st.metric("🆕 최근 작업", latest_str)
+        with col_s3:
+            try:
+                oldest_ts = datetime.fromisoformat(history[-1]["timestamp"])
+                days_old = (datetime.now() - oldest_ts).days
+                oldest_str = f"{days_old}일 전"
+            except Exception:
+                oldest_str = "?"
+            st.metric("🗓 가장 오래된", oldest_str)
+
+        st.divider()
+
+        # 검색
+        search_q = st.text_input(
+            "🔍 검색 (제목·파일명)",
+            key="hist_search_v2",
+            placeholder="예: 신주쿠, 1K, japanreal2_1.jpg",
+        )
+
+        # 필터링
+        filtered = history
+        if search_q:
+            q = search_q.lower()
+            filtered = [
+                h for h in history
+                if q in h.get("title", "").lower()
+                or q in h.get("filename", "").lower()
+            ]
+
+        if not filtered:
+            st.warning(f"'{search_q}' 검색 결과 없음")
+        else:
+            st.markdown(f"**검색 결과: {len(filtered)}건**")
+
+            # 선택 삭제 모드
+            col_btn1, col_btn2 = st.columns([1, 5])
+            with col_btn1:
+                if st.button("☑️ 모두 선택", use_container_width=True):
+                    for h in filtered:
+                        st.session_state[f"hist_sel_{h['id']}"] = True
+                    st.rerun()
+            with col_btn2:
+                if st.button("⬜ 모두 해제", use_container_width=True):
+                    for h in filtered:
+                        st.session_state[f"hist_sel_{h['id']}"] = False
+                    st.rerun()
+
+            st.divider()
+
+            # 이력 목록 표시
+            selected_ids = []
+            for idx, h in enumerate(filtered):
+                hid = h.get("id", "")
+                title = h.get("title", "(제목 없음)")
+                filename = h.get("filename", "")
+                timestamp = h.get("timestamp", "")
+
+                # 표시용 시간 포맷
+                try:
+                    ts_obj = datetime.fromisoformat(timestamp)
+                    ts_display = ts_obj.strftime("%Y-%m-%d %H:%M")
+                    # ⭐ 영구 보존이라 자동 삭제 경고 없음
+                    retention_warn = ""
+                except Exception:
+                    ts_display = timestamp
+                    retention_warn = ""
+
+                # 체크박스 + 제목
+                col_chk, col_info = st.columns([0.5, 9])
+                with col_chk:
+                    checked = st.checkbox(
+                        " ",
+                        key=f"hist_sel_{hid}",
+                        label_visibility="collapsed",
+                    )
+                    if checked:
+                        selected_ids.append(hid)
+
+                with col_info:
+                    st.markdown(
+                        f"**{idx+1}. {title}**  \n"
+                        f"<span style='color:#888;font-size:13px'>"
+                        f"📁 {filename} · 🕒 {ts_display}{retention_warn}</span>",
+                        unsafe_allow_html=True,
+                    )
+
+                # 카톡 요약 표시 (접힘 상태가 기본)
+                summary = h.get("summary_for_chat", "")
+                if summary:
+                    with st.expander("📱 카카오톡용 요약 보기", expanded=False):
+                        st.code(summary, language=None, wrap_lines=True)
+
+                # 추가 작업: 본문 + 다운로드 (펼침)
+                with st.expander("📄 본문 HTML + 해시태그 + 다운로드", expanded=False):
+                    html = h.get("html_content", "")
+                    if html:
+                        st.markdown(html, unsafe_allow_html=True)
+                    tags = h.get("hashtags", [])
+                    if tags:
+                        st.markdown("**해시태그**")
+                        st.code(" ".join(tags), language=None)
+
+                    # 다운로드 버튼들
+                    dl_col1, dl_col2 = st.columns(2)
+                    with dl_col1:
+                        st.download_button(
+                            "💾 HTML 다운로드",
+                            build_naver_smarteditor_html({
+                                "title": title,
+                                "html_content": html,
+                                "hashtags": tags,
+                            }),
+                            file_name=f"history_{hid}_{Path(filename).stem}.html",
+                            mime="text/html",
+                            key=f"hist_dl_html_{hid}",
+                            use_container_width=True,
+                        )
+                    with dl_col2:
+                        st.download_button(
+                            "📋 JSON 다운로드",
+                            json.dumps(h, ensure_ascii=False, indent=2),
+                            file_name=f"history_{hid}.json",
+                            mime="application/json",
+                            key=f"hist_dl_json_{hid}",
+                            use_container_width=True,
+                        )
+
+                st.divider()
+
+            # 선택 삭제 + 전체 삭제 버튼
+            st.markdown("---")
+            col_d1, col_d2, col_d3 = st.columns([2, 2, 6])
+            with col_d1:
+                if st.button(
+                    f"🗑️ 선택 항목 삭제 ({len(selected_ids)}개)",
+                    type="primary",
+                    disabled=(len(selected_ids) == 0),
+                    use_container_width=True,
+                ):
+                    delete_from_history(selected_ids)
+                    # 선택 상태 초기화
+                    for sid in selected_ids:
+                        st.session_state.pop(f"hist_sel_{sid}", None)
+                    st.success(f"✅ {len(selected_ids)}개 항목 삭제 완료")
+                    st.rerun()
+
+            with col_d2:
+                if st.button(
+                    "🗑️ 전체 삭제",
+                    type="secondary",
+                    use_container_width=True,
+                ):
+                    if st.session_state.get("_confirm_clear_all"):
+                        clear_history()
+                        st.session_state.pop("_confirm_clear_all", None)
+                        st.success("✅ 모든 이력 삭제 완료")
+                        st.rerun()
+                    else:
+                        st.session_state["_confirm_clear_all"] = True
+                        st.warning("⚠️ 한 번 더 클릭하면 모든 이력이 삭제됩니다.")
+
+            with col_d3:
+                # 전체 백업 다운로드
+                if filtered:
+                    st.download_button(
+                        f"📥 전체 백업 다운로드 ({len(history)}건 JSON)",
+                        json.dumps(history, ensure_ascii=False, indent=2),
+                        file_name=f"jre_history_backup_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+                        mime="application/json",
+                        use_container_width=True,
+                    )
+
+
+tab1, tab2, tab3, tab4 = st.tabs(
     [
         "1️⃣ 도면 업로드",
         "2️⃣ 추출 결과·스타일 선택",
         "3️⃣ 블로그 미리보기",
         "4️⃣ 네이버 카페 발행",
-        "5️⃣ 📚 이력 보관함",
     ]
 )
 
@@ -976,207 +1178,3 @@ with tab4:
                 for e in errors:
                     st.markdown(f"**{e['idx']+1}. {e['title']}**")
                     st.markdown(e["error"])
-
-
-# ───── Tab 5: 📚 이력 보관함 ─────
-with tab5:
-    st.subheader("📚 작업 이력 보관함")
-    st.caption(
-        "💡 생성된 모든 블로그가 자동 저장됩니다. "
-        "**영구 보존** — 수동 삭제 전까지 안 사라집니다."
-    )
-
-    # 이력 로드 (실패해도 빈 리스트 반환)
-    try:
-        history = load_history()
-    except Exception as e:
-        st.error(f"⚠️ 이력 로드 중 에러: {e}")
-        history = []
-
-    if not history:
-        st.info(
-            "아직 저장된 이력이 없습니다.\n\n"
-            "1·2번 탭에서 블로그를 생성하면 자동으로 여기에 저장됩니다."
-        )
-    else:
-        # 통계 표시
-        col_s1, col_s2, col_s3 = st.columns(3)
-        with col_s1:
-            st.metric("📊 총 이력", f"{len(history)}건")
-        with col_s2:
-            try:
-                latest_ts = datetime.fromisoformat(history[0]["timestamp"])
-                latest_str = latest_ts.strftime("%Y-%m-%d %H:%M")
-            except Exception:
-                latest_str = "?"
-            st.metric("🆕 최근 작업", latest_str)
-        with col_s3:
-            try:
-                oldest_ts = datetime.fromisoformat(history[-1]["timestamp"])
-                days_old = (datetime.now() - oldest_ts).days
-                oldest_str = f"{days_old}일 전"
-            except Exception:
-                oldest_str = "?"
-            st.metric("🗓 가장 오래된", oldest_str)
-
-        st.divider()
-
-        # 검색
-        search_q = st.text_input(
-            "🔍 검색 (제목·파일명)",
-            key="hist_search_v2",
-            placeholder="예: 신주쿠, 1K, japanreal2_1.jpg",
-        )
-
-        # 필터링
-        filtered = history
-        if search_q:
-            q = search_q.lower()
-            filtered = [
-                h for h in history
-                if q in h.get("title", "").lower()
-                or q in h.get("filename", "").lower()
-            ]
-
-        if not filtered:
-            st.warning(f"'{search_q}' 검색 결과 없음")
-        else:
-            st.markdown(f"**검색 결과: {len(filtered)}건**")
-
-            # 선택 삭제 모드
-            col_btn1, col_btn2 = st.columns([1, 5])
-            with col_btn1:
-                if st.button("☑️ 모두 선택", use_container_width=True):
-                    for h in filtered:
-                        st.session_state[f"hist_sel_{h['id']}"] = True
-                    st.rerun()
-            with col_btn2:
-                if st.button("⬜ 모두 해제", use_container_width=True):
-                    for h in filtered:
-                        st.session_state[f"hist_sel_{h['id']}"] = False
-                    st.rerun()
-
-            st.divider()
-
-            # 이력 목록 표시
-            selected_ids = []
-            for idx, h in enumerate(filtered):
-                hid = h.get("id", "")
-                title = h.get("title", "(제목 없음)")
-                filename = h.get("filename", "")
-                timestamp = h.get("timestamp", "")
-
-                # 표시용 시간 포맷
-                try:
-                    ts_obj = datetime.fromisoformat(timestamp)
-                    ts_display = ts_obj.strftime("%Y-%m-%d %H:%M")
-                    # ⭐ 영구 보존이라 자동 삭제 경고 없음
-                    retention_warn = ""
-                except Exception:
-                    ts_display = timestamp
-                    retention_warn = ""
-
-                # 체크박스 + 제목
-                col_chk, col_info = st.columns([0.5, 9])
-                with col_chk:
-                    checked = st.checkbox(
-                        " ",
-                        key=f"hist_sel_{hid}",
-                        label_visibility="collapsed",
-                    )
-                    if checked:
-                        selected_ids.append(hid)
-
-                with col_info:
-                    st.markdown(
-                        f"**{idx+1}. {title}**  \n"
-                        f"<span style='color:#888;font-size:13px'>"
-                        f"📁 {filename} · 🕒 {ts_display}{retention_warn}</span>",
-                        unsafe_allow_html=True,
-                    )
-
-                # 카톡 요약 표시 (접힘 상태가 기본)
-                summary = h.get("summary_for_chat", "")
-                if summary:
-                    with st.expander("📱 카카오톡용 요약 보기", expanded=False):
-                        st.code(summary, language=None, wrap_lines=True)
-
-                # 추가 작업: 본문 + 다운로드 (펼침)
-                with st.expander("📄 본문 HTML + 해시태그 + 다운로드", expanded=False):
-                    html = h.get("html_content", "")
-                    if html:
-                        st.markdown(html, unsafe_allow_html=True)
-                    tags = h.get("hashtags", [])
-                    if tags:
-                        st.markdown("**해시태그**")
-                        st.code(" ".join(tags), language=None)
-
-                    # 다운로드 버튼들
-                    dl_col1, dl_col2 = st.columns(2)
-                    with dl_col1:
-                        st.download_button(
-                            "💾 HTML 다운로드",
-                            build_naver_smarteditor_html({
-                                "title": title,
-                                "html_content": html,
-                                "hashtags": tags,
-                            }),
-                            file_name=f"history_{hid}_{Path(filename).stem}.html",
-                            mime="text/html",
-                            key=f"hist_dl_html_{hid}",
-                            use_container_width=True,
-                        )
-                    with dl_col2:
-                        st.download_button(
-                            "📋 JSON 다운로드",
-                            json.dumps(h, ensure_ascii=False, indent=2),
-                            file_name=f"history_{hid}.json",
-                            mime="application/json",
-                            key=f"hist_dl_json_{hid}",
-                            use_container_width=True,
-                        )
-
-                st.divider()
-
-            # 선택 삭제 + 전체 삭제 버튼
-            st.markdown("---")
-            col_d1, col_d2, col_d3 = st.columns([2, 2, 6])
-            with col_d1:
-                if st.button(
-                    f"🗑️ 선택 항목 삭제 ({len(selected_ids)}개)",
-                    type="primary",
-                    disabled=(len(selected_ids) == 0),
-                    use_container_width=True,
-                ):
-                    delete_from_history(selected_ids)
-                    # 선택 상태 초기화
-                    for sid in selected_ids:
-                        st.session_state.pop(f"hist_sel_{sid}", None)
-                    st.success(f"✅ {len(selected_ids)}개 항목 삭제 완료")
-                    st.rerun()
-
-            with col_d2:
-                if st.button(
-                    "🗑️ 전체 삭제",
-                    type="secondary",
-                    use_container_width=True,
-                ):
-                    if st.session_state.get("_confirm_clear_all"):
-                        clear_history()
-                        st.session_state.pop("_confirm_clear_all", None)
-                        st.success("✅ 모든 이력 삭제 완료")
-                        st.rerun()
-                    else:
-                        st.session_state["_confirm_clear_all"] = True
-                        st.warning("⚠️ 한 번 더 클릭하면 모든 이력이 삭제됩니다.")
-
-            with col_d3:
-                # 전체 백업 다운로드
-                if filtered:
-                    st.download_button(
-                        f"📥 전체 백업 다운로드 ({len(history)}건 JSON)",
-                        json.dumps(history, ensure_ascii=False, indent=2),
-                        file_name=f"jre_history_backup_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
-                        mime="application/json",
-                        use_container_width=True,
-                    )
