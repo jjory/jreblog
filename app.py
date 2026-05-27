@@ -1231,11 +1231,17 @@ with tab6:
         "**영구 보존** — 수동 삭제 전까지 안 사라집니다."
     )
 
+    # ⭐ 디버그 정보 — 6번 탭이 화면에 보이는지 확인용
+    st.success("✅ 6번 탭 정상 진입 — 이 메시지가 보이면 탭 자체는 작동 중")
+
     # 이력 로드 (실패해도 빈 리스트 반환)
     try:
         history = load_history()
+        st.info(f"📊 load_history() 호출 성공 — 이력 {len(history)}건")
     except Exception as e:
+        import traceback
         st.error(f"⚠️ 이력 로드 중 에러: {e}")
+        st.code(traceback.format_exc(), language="python")
         history = []
 
     if not history:
