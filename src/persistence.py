@@ -104,6 +104,48 @@ def clear_history() -> bool:
     return _safe_write_json(HISTORY_FILE, [])
 
 
+def toggle_favorite(item_id: str) -> bool:
+    """즐겨찾기 토글. 반환: 토글 후 favorite 상태"""
+    if not item_id:
+        return False
+    history = load_history()
+    new_state = False
+    for h in history:
+        if h.get("id") == item_id:
+            current = h.get("favorite", False)
+            h["favorite"] = not current
+            new_state = h["favorite"]
+            break
+    _safe_write_json(HISTORY_FILE, history)
+    return new_state
+
+
+def delete_old_history(months: int) -> int:
+    """N개월 이상 된 이력 일괄 삭제. 즐겨찾기는 보호. 반환: 삭제된 건수"""
+    if months < 1:
+        return 0
+    history = load_history()
+    cutoff = datetime.now() - timedelta(days=months * 30)
+    cutoff_iso = cutoff.isoformat(timespec="seconds")
+
+    kept = []
+    deleted_count = 0
+    for h in history:
+        # 즐겨찾기는 보호
+        if h.get("favorite"):
+            kept.append(h)
+            continue
+        # timestamp 비교
+        ts = h.get("timestamp", "")
+        if ts and ts < cutoff_iso:
+            deleted_count += 1
+        else:
+            kept.append(h)
+
+    _safe_write_json(HISTORY_FILE, kept)
+    return deleted_count
+
+
 # ─────────────────────────────────────────────────
 # 임시 세션 (24시간 retention)
 # ─────────────────────────────────────────────────
