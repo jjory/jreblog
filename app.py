@@ -108,6 +108,34 @@ def _extract_property_number(filename: str) -> str:
     return ""
 
 
+def _insert_property_number_to_table(html: str, prop_num: str) -> str:
+    """본문 '매물 기본정보' 표 맨 위에 매물번호 행을 삽입.
+    첫 번째 <table>의 첫 <tr> 앞에 매물번호 행 추가.
+    이미 매물번호 행이 있으면 중복 삽입 안 함.
+    """
+    if not html or not prop_num:
+        return html
+    # 이미 매물번호가 들어있으면 스킵
+    if "매물번호" in html:
+        return html
+
+    # 첫 번째 <table ...> 다음에 매물번호 행 삽입
+    num_row = (
+        '<tr>'
+        '<td style="border:1px solid #ddd;padding:8px 12px;background:#f5f5f5;'
+        'width:30%;font-weight:bold">매물번호</td>'
+        f'<td style="border:1px solid #ddd;padding:8px 12px">{prop_num}</td>'
+        '</tr>'
+    )
+    # <table ...> 태그를 찾아 그 직후에 삽입
+    m = re.search(r"(<table[^>]*>)", html)
+    if m:
+        insert_pos = m.end()
+        return html[:insert_pos] + num_row + html[insert_pos:]
+    # 표가 없으면 원본 유지
+    return html
+
+
 def _extract_ward(title: str) -> str:
     """제목에서 구/시 추출. 실제 제목: '이타바시구 도부토조선 나리마스역 도보 5분 ...'
     또는 매물번호가 앞에 붙은 경우: '[1234567] 이타바시구 ...' """
@@ -1633,34 +1661,53 @@ with tab1:
                     st.image(uf, caption=uf.name, use_container_width=True)
 
         if st.button("🔍 전체 도면 병렬 분석 시작", type="primary"):
+            # ⭐ 이전 분석 결과 완전 초기화 (다른 도면인데 같은 결과 나오는 버그 방지)
+            st.session_state.pop("properties", None)
+            st.session_state.pop("blog_posts", None)
+            st.session_state.pop("untranslated_alert", None)
+
             properties = []
             errors = []
             progress = st.progress(0.0, text="병렬 분석 시작…")
 
             # 파일 미리 읽기 (Streamlit UploadedFile은 thread-safe 안 함)
-            file_jobs = [
-                (uf.name, uf.getvalue(), Path(uf.name).suffix)
-                for uf in uploaded_files
-            ]
+            # ⭐ 파일명 중복 방지: 같은 이름이면 인덱스 부여
+            file_jobs = []
+            seen_names = {}
+            for uf in uploaded_files:
+                base_name = uf.name
+                if base_name in seen_names:
+                    seen_names[base_name] += 1
+                    # 같은 파일명 구분 (확장자 앞에 _2, _3)
+                    stem = Path(base_name).stem
+                    suf = Path(base_name).suffix
+                    unique_name = f"{stem}_{seen_names[base_name]}{suf}"
+                else:
+                    seen_names[base_name] = 1
+                    unique_name = base_name
+                file_jobs.append((unique_name, uf.getvalue(), Path(uf.name).suffix))
 
             with ThreadPoolExecutor(max_workers=MAX_PARALLEL_WORKERS) as executor:
-                future_to_name = {
-                    executor.submit(_analyze_worker, file_bytes, suffix, engine, model): name
-                    for name, file_bytes, suffix in file_jobs
+                # ⭐ 인덱스 기반 매핑 (파일명 중복돼도 결과 안 섞임)
+                future_to_idx = {
+                    executor.submit(_analyze_worker, file_bytes, suffix, engine, model): idx
+                    for idx, (name, file_bytes, suffix) in enumerate(file_jobs)
                 }
 
+                results_by_idx = {}
                 done = 0
-                total = len(future_to_name)
-                for future in as_completed(future_to_name):
-                    name = future_to_name[future]
+                total = len(future_to_idx)
+                for future in as_completed(future_to_idx):
+                    idx = future_to_idx[future]
+                    name = file_jobs[idx][0]
                     try:
                         data = future.result()
-                        properties.append({
+                        results_by_idx[idx] = {
                             "filename": name,
                             "property_number": _extract_property_number(name),
                             "data": data,
                             "style": default_style,  # 기본 스타일
-                        })
+                        }
                     except Exception as e:
                         errors.append(format_error_korean(e, name))
                     done += 1
@@ -1670,9 +1717,8 @@ with tab1:
                     )
 
             progress.progress(1.0, text="✅ 분석 완료")
-            # 업로드 순서대로 정렬 (병렬 완료 순서가 뒤죽박죽일 수 있음)
-            order = {name: i for i, (name, _, _) in enumerate(file_jobs)}
-            properties.sort(key=lambda p: order.get(p["filename"], 999))
+            # 업로드 순서대로 정렬 (인덱스 순)
+            properties = [results_by_idx[i] for i in sorted(results_by_idx.keys())]
 
             if properties:
                 st.session_state["properties"] = properties
@@ -1809,12 +1855,11 @@ with tab2:
                     prop_num = properties[i].get("property_number", "")
                     try:
                         post = future.result()
-                        # 매물번호를 제목 앞에 붙이기 (있는 경우)
+                        # ⭐ 매물번호는 제목이 아닌 본문 기본정보 표에 삽입
                         if prop_num:
-                            original_title = post.get("title", "")
-                            # 이미 [번호]가 있으면 중복 방지
-                            if not original_title.startswith(f"[{prop_num}]"):
-                                post["title"] = f"[{prop_num}] {original_title}"
+                            post["html_content"] = _insert_property_number_to_table(
+                                post.get("html_content", ""), prop_num
+                            )
                         blog_posts[i] = {
                             "filename": name,
                             "property_number": prop_num,
@@ -1850,6 +1895,22 @@ with tab2:
                 # 현재 세션도 디스크 저장 (새로고침 대비)
                 _persist_session()
 
+                # ⭐ DB(路線 시트) 미등록 항목 수집 → 경고 표시
+                all_untranslated = []
+                for bp in blog_posts:
+                    post = bp["post"]
+                    for item in post.get("untranslated", []):
+                        all_untranslated.append(item)
+                # 중복 제거
+                seen_keys = set()
+                unique_untranslated = []
+                for item in all_untranslated:
+                    k = (item.get("category"), item.get("original"))
+                    if k not in seen_keys:
+                        seen_keys.add(k)
+                        unique_untranslated.append(item)
+                st.session_state["untranslated_alert"] = unique_untranslated
+
                 st.success(
                     f"✅ 블로그 {len(blog_posts)}개 생성 완료! "
                     f"3번 탭에서 확인하시거나, 화면 상단 **'📚 작업 이력 보관함'** expander에서 "
@@ -1876,6 +1937,23 @@ with tab3:
         )
     else:
         st.subheader(f"📝 생성된 블로그 — 총 {len(blog_posts)}개")
+
+        # ⭐ DB(路線 시트) 미등록 항목 경고 — 회사 DB 추가 등록 안내
+        _untrans = st.session_state.get("untranslated_alert", [])
+        if _untrans:
+            warn_lines = []
+            for item in _untrans:
+                warn_lines.append(
+                    f"- **{item.get('category')}**: `{item.get('original')}` "
+                    f"({item.get('note', '')})"
+                )
+            st.warning(
+                "⚠️ **회사 번역 DB에 등록되지 않은 항목이 있습니다.**\n\n"
+                + "\n".join(warn_lines)
+                + "\n\n위 항목은 일본어가 한국어로 번역되지 않았을 수 있습니다. "
+                "**路線 시트(번역 DB)에 추가 등록**하면 다음부터 자동 번역됩니다.\n\n"
+                "👉 DB: https://docs.google.com/spreadsheets/d/1D6u75qwjPodXS82SWaZhJ0MzNIn3Hf_GkPMiYutZthA"
+            )
 
         # 전체 ZIP 다운로드 (G드라이브 저장용)
         target_folder = OUTPUT_FOLDER_PATH
