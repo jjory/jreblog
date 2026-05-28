@@ -486,6 +486,14 @@ def _render_login_screen():
                         # URL 토큰에 이메일 정보 저장 (계정 기억)
                         st.query_params["user_email"] = user["email"]
                         st.query_params["auth"] = _email_token(user["email"])
+                        # ⭐ 로그인 시 새 세션 ID 발급 + 이전 작업 상태 초기화
+                        # (계정 전환 시 이전 계정의 분석 결과가 따라오지 않게)
+                        st.query_params["sid"] = generate_session_id()
+                        st.session_state.pop("properties", None)
+                        st.session_state.pop("blog_posts", None)
+                        st.session_state.pop("untranslated_alert", None)
+                        st.session_state.pop("_analysis_done_this_session", None)
+                        st.session_state.pop("_session_restored", None)
                         st.rerun()
                     else:
                         st.error("❌ 이메일 또는 비밀번호가 올바르지 않습니다.")
@@ -511,13 +519,21 @@ is_admin = (current_role == "admin")
 
 
 def _logout():
-    """로그아웃 — 세션 + URL 토큰 모두 제거"""
+    """로그아웃 — 세션 + URL 토큰 + 작업 상태 모두 제거"""
     st.session_state.pop("user", None)
     # remembered_email은 유지 (다음 로그인 시 자동 입력)
     if "user_email" in st.query_params:
         del st.query_params["user_email"]
     if "auth" in st.query_params:
         del st.query_params["auth"]
+    # ⭐ 작업 상태 + 세션 ID 초기화 (다음 로그인 계정에 안 따라가게)
+    st.session_state.pop("properties", None)
+    st.session_state.pop("blog_posts", None)
+    st.session_state.pop("untranslated_alert", None)
+    st.session_state.pop("_analysis_done_this_session", None)
+    st.session_state.pop("_session_restored", None)
+    if "sid" in st.query_params:
+        del st.query_params["sid"]
 
 
 
