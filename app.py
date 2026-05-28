@@ -541,7 +541,7 @@ st.caption(
     "AI 병렬 분석 → 한국어 블로그 일괄 생성"
 )
 
-# 사용자 환영 카드 — 관리자는 전체 매물, 일반 사용자는 본인 매물 표시
+# 사용자 환영 카드 — 회사 전체 통계 표시 (이력은 모두 공유)
 try:
     _all_history = load_history()
     # 기존 이력 호환성 (user_email 없는 경우)
@@ -549,15 +549,8 @@ try:
         if not h.get("user_email"):
             h["user_email"] = ADMIN_EMAIL
 
-    if is_admin:
-        # 관리자: 전사 전체 매물 표시
-        _shown_history = _all_history
-    else:
-        # 일반 사용자: 본인 매물만
-        _shown_history = [
-            h for h in _all_history
-            if h.get("user_email") == current_email
-        ]
+    # 회사 전체 매물 (관리자/사용자 모두 동일하게 표시)
+    _shown_history = _all_history
 
     _my_count = len(_shown_history)
     _my_cost = _my_count * 110  # 매물당 약 110원 (Opus + Extended Thinking)
@@ -568,9 +561,9 @@ try:
 except Exception:
     _my_count = _my_cost = _my_this_month = 0
 
-# 라벨도 권한별로 다르게
+# 라벨 — 역할만 다르고 통계는 모두 전체
 _role_label = "👑 관리자" if is_admin else "👤 사용자"
-_count_label = "전체 매물" if is_admin else "내 매물"
+_count_label = "회사 매물"
 st.markdown(
     f"""
 <div style='background:linear-gradient(135deg,#E3F2FD 0%,#F3E5F5 100%);
@@ -999,19 +992,15 @@ def _generate_worker(property_data, target_visa, style_name, custom_instructions
 # Expander 제목에 이력 건수·용량을 동적으로 표시 (펼치지 않고도 확인 가능)
 try:
     _hist_preview = load_history()
-    # 권한별 필터링 (제목 미리보기용)
-    if is_admin:
-        _hist_count = len(_hist_preview)
-    else:
-        _hist_count = sum(1 for h in _hist_preview 
-                          if (h.get("user_email") or ADMIN_EMAIL) == current_email)
+    # 작업 이력은 모든 사용자가 공유 (관리자/사용자 구분 없음)
+    _hist_count = len(_hist_preview)
 except Exception:
     _hist_count = 0
 
-# 파일 크기 계산 (사람이 읽기 좋은 단위로 포맷) — 관리자만 정확한 디스크 사용량 표시
+# 파일 크기 계산 (모든 사용자에게 표시)
 try:
     from src.persistence import HISTORY_FILE
-    if HISTORY_FILE.exists() and is_admin:
+    if HISTORY_FILE.exists():
         _hist_bytes = HISTORY_FILE.stat().st_size
         if _hist_bytes < 1024:
             _hist_size = f"{_hist_bytes}B"
@@ -1020,12 +1009,12 @@ try:
         else:
             _hist_size = f"{_hist_bytes/(1024*1024):.2f}MB"
     else:
-        _hist_size = ""
+        _hist_size = "0B"
 except Exception:
     _hist_size = ""
 
-# Expander 제목: 건수와 용량 같이 표시 (일반 사용자는 본인 매물 기준)
-_label_prefix = "📚 작업 이력 보관함" if is_admin else "📚 내 작업 이력"
+# Expander 제목 — 모든 사용자 동일 (작업 이력은 회사 공유)
+_label_prefix = "📚 작업 이력 보관함"
 if _hist_count == 0:
     _expander_label = f"{_label_prefix} (비어 있음 · 클릭하여 펼치기)"
 elif _hist_size:
@@ -1035,22 +1024,19 @@ else:
 
 with st.expander(_expander_label, expanded=False):
     st.caption(
-        "💡 생성된 모든 블로그가 자동 저장됩니다. "
-        "**영구 보존** — 수동 삭제 전까지 안 사라집니다."
+        "💡 회사 전체 매물 이력이 자동 저장됩니다. "
+        "**영구 보존** · 모든 사용자가 공유 · 수동 삭제 전까지 안 사라집니다."
     )
 
-    # 이력 로드 (실패해도 빈 리스트 반환)
+    # 이력 로드 (실패해도 빈 리스트 반환) — 모든 사용자가 전체 이력 조회
     try:
         history_all = load_history()
         # 기존 이력 (user_email 없음) → admin@win-bro.com 작성으로 처리
         for h in history_all:
             if not h.get("user_email"):
                 h["user_email"] = ADMIN_EMAIL
-        # 권한별 필터링: 관리자는 전체, 일반 사용자는 본인 매물만
-        if is_admin:
-            history = history_all
-        else:
-            history = [h for h in history_all if h.get("user_email") == current_email]
+        # 작업 이력은 회사 공유: 모든 사용자가 전체 이력 조회
+        history = history_all
     except Exception as e:
         st.error(f"⚠️ 이력 로드 중 에러: {e}")
         history = []
