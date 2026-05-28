@@ -573,17 +573,41 @@ def generate_blog_post(
     last_error = None
     for attempt in range(max_retries):
         try:
-            # Extended Thinking 활성화 - 블로그 품질 향상 (Claude가 더 깊이 사고 후 작성)
-            # budget_tokens 5000 = 충분한 추론 + 합리적 비용
-            response = client.messages.create(
-                model=model,
-                max_tokens=16384,  # thinking + 본문을 모두 수용하기 위해 증가
-                thinking={
+            # ─── Extended/Adaptive Thinking 모델별 자동 분기 ───
+            # Opus 4.7:  thinking 제거됨 → adaptive 사용 (effort 파라미터)
+            # Sonnet 4.6: adaptive thinking 지원
+            # Haiku 4.5:  extended thinking (enabled + budget_tokens) 지원
+            # 이외 모델:  thinking 미사용 (안전)
+            request_params = {
+                "model": model,
+                "max_tokens": 16384,
+                "messages": [{"role": "user", "content": prompt}],
+            }
+            model_lower = model.lower()
+            if "opus-4-7" in model_lower or "opus-4.7" in model_lower:
+                # Opus 4.7: adaptive thinking
+                request_params["thinking"] = {"type": "adaptive"}
+            elif "sonnet-4-6" in model_lower or "sonnet-4.6" in model_lower:
+                # Sonnet 4.6: adaptive thinking 지원
+                request_params["thinking"] = {"type": "adaptive"}
+            elif "haiku-4-5" in model_lower or "haiku-4.5" in model_lower:
+                # Haiku 4.5: extended thinking
+                request_params["thinking"] = {
                     "type": "enabled",
                     "budget_tokens": 5000,
-                },
-                messages=[{"role": "user", "content": prompt}],
-            )
+                }
+            # 그 외 모델은 thinking 미사용
+
+            try:
+                response = client.messages.create(**request_params)
+            except Exception as thinking_err:
+                # thinking 파라미터 호환성 문제 시 thinking 없이 재시도 (안전 폴백)
+                err_str = str(thinking_err).lower()
+                if "thinking" in err_str and "thinking" in request_params:
+                    request_params.pop("thinking", None)
+                    response = client.messages.create(**request_params)
+                else:
+                    raise
 
             # thinking 블록 + text 블록이 모두 있을 수 있음 - text만 추출
             raw_text = ""
