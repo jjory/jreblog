@@ -218,7 +218,11 @@ BLOG_GENERATION_PROMPT = """\
    - <h2>✨ 추천 이유</h2>
    - <h2>💬 상담 신청</h2>
 
-1. **인사말 + 한 줄 매물 소개** (매물명·주소 언급 금지)
+1. **한 줄 매물 소개만** (⚠️ 인사말 절대 금지)
+   - "안녕하세요", "JRE일본부동산입니다" 같은 **인사말은 절대 쓰지 마세요.**
+     인사말은 시스템이 본문 맨 위에 자동으로 넣습니다. AI가 또 쓰면 중복됩니다.
+   - 곧바로 오늘 소개할 매물을 2~3줄로 자연스럽게 소개 (지역·역·방구조·월세+관리비 포함)
+   - 매물명·주소는 언급 금지
 
 2. **<h2>📋 매물 기본정보</h2>**
    ⚠️ **헤더 바로 다음에 표만 작성. 표 앞에 어떤 설명 문단도 절대 넣지 말 것**
@@ -256,10 +260,22 @@ BLOG_GENERATION_PROMPT = """\
    - 데이터에 없는 항목은 셀 값에 "(현지 확인 필요)"로 표기
    - 매물명·주소·계약기간은 이 표에 절대 넣지 마세요
 
-3. **<h2>🏠 방 구조와 설비</h2>** — 방 구성, 에어컨·욕실·세탁기 등 설비
+3. **<h2>🏠 방 구조와 설비</h2>**
+   - 먼저 방 구성을 2~3줄로 설명 (전용면적·방 개수·주방 형태 등 **데이터로 확인되는 것만**)
+   - 그 다음 "설비도 꼼꼼하게 갖춰져 있어요 ✨" 같은 한 줄을 넣고,
+     **확인된 설비를 ✅ 체크리스트로** 나열하세요.
+     → 각 설비를 **`<p>✅ 설비명</p>` 형식으로 한 줄씩** 작성 (불릿/ul 쓰지 말고 p 태그로)
+     → 예시:
+       ```html
+       <p>✅ 욕실·화장실 분리형</p>
+       <p>✅ 비데</p>
+       <p>✅ 발코니</p>
+       <p>✅ 오토락 + 모니터 인터폰</p>
+       <p>✅ 인터넷 무료</p>
+       ```
+   - ⚠️ 체크리스트에는 **데이터로 확인되는 설비만** 넣을 것 (추측·과장 금지, 작성 원칙 A·B·E 준수)
    - 비데가 있으면 "비데"로만 표기 (워시렛/온수세정변기 금지)
    - 욕실·화장실이 분리돼 있으면 "욕실·화장실 분리형"으로만 표기
-   - 설비는 데이터로 확인되는 것만. 추측·과장 금지 (작성 원칙 A·B·E 준수)
 
 4. **<h2>📍 위치와 생활 인프라</h2>**
    - ⭐ **신주쿠·시부야·이케부쿠로·닛포리 등 주요 요충지까지의 소요 시간** 중심으로 작성
@@ -407,6 +423,81 @@ def _ensure_table_styles(html: str) -> str:
     html = re.sub(r"<th([^>]*)>", _inject_th, html)
 
     return html
+
+
+# 상단 고정 인사말 (요청: 항상 동일하게 본문 맨 위에 삽입)
+FIXED_GREETING_HTML = (
+    '<p style="text-align:center;font-size:15px;line-height:1.8;margin:8px 0">'
+    "안녕하세요🌸</p>\n"
+    '<p style="text-align:center;font-size:15px;line-height:1.8;margin:8px 0">'
+    "한국분들께 일본 부동산을 전문적으로 안내해드리고 있는 JRE일본부동산입니다 😊</p>\n"
+    '<p style="text-align:center;font-size:15px;line-height:1.8;margin:8px 0"><br/></p>\n'
+)
+
+
+def _apply_naver_formatting(html: str) -> str:
+    """
+    네이버 블로그용 최종 포맷팅 (복사 붙여넣기만으로 게재 가능하게).
+    - 본문 문단·헤더·리스트에 가운데 정렬 + 폰트 크기를 inline style로 주입
+    - 기본 폰트 15px, 대카테고리 헤더(h2) 24px
+    - 상단 고정 인사말을 맨 앞에 삽입
+    ⚠️ 표(table/td/th)는 건드리지 않음 — 좌측 라벨 + 전체폭 레이아웃 유지.
+    이미 style이 있는 태그는 덮어쓰지 않음 (표·강조 등 보존).
+    """
+    # 대카테고리 헤더 (📋 매물 기본정보 등) → 24px, 가운데, 굵게
+    def _inject_h2(m):
+        attrs = m.group(1) or ""
+        if "style=" in attrs:
+            return m.group(0)
+        return (
+            '<h2 style="text-align:center;font-size:24px;'
+            'font-weight:bold;margin:26px 0 12px"' + attrs + ">"
+        )
+    html = re.sub(r"<h2([^>]*)>", _inject_h2, html)
+
+    # 소제목(h3, 있을 경우) → 17px, 가운데
+    def _inject_h3(m):
+        attrs = m.group(1) or ""
+        if "style=" in attrs:
+            return m.group(0)
+        return (
+            '<h3 style="text-align:center;font-size:17px;'
+            'font-weight:bold;margin:18px 0 8px"' + attrs + ">"
+        )
+    html = re.sub(r"<h3([^>]*)>", _inject_h3, html)
+
+    # 본문 문단 → 15px, 가운데
+    def _inject_p(m):
+        attrs = m.group(1) or ""
+        if "style=" in attrs:
+            return m.group(0)
+        return (
+            '<p style="text-align:center;font-size:15px;'
+            'line-height:1.8;margin:8px 0"' + attrs + ">"
+        )
+    html = re.sub(r"<p([^>]*)>", _inject_p, html)
+
+    # 리스트(ul/ol) → 가운데, 불릿 제거 (체크리스트는 보통 <p>✅…로 오지만 안전망)
+    def _inject_ul(m):
+        attrs = m.group(1) or ""
+        if "style=" in attrs:
+            return m.group(0)
+        return (
+            '<ul style="text-align:center;font-size:15px;'
+            'list-style:none;padding:0;margin:8px 0"' + attrs + ">"
+        )
+    html = re.sub(r"<ul([^>]*)>", _inject_ul, html)
+    html = re.sub(r"<ol([^>]*)>", _inject_ul, html)
+
+    def _inject_li(m):
+        attrs = m.group(1) or ""
+        if "style=" in attrs:
+            return m.group(0)
+        return '<li style="font-size:15px;line-height:1.8"' + attrs + ">"
+    html = re.sub(r"<li([^>]*)>", _inject_li, html)
+
+    # 상단 고정 인사말 삽입 (맨 앞)
+    return FIXED_GREETING_HTML + html
 
 
 def _extract_ward_from_address(address: str) -> str:
@@ -743,6 +834,8 @@ def generate_blog_post(
             if result.get("html_content"):
                 result["html_content"] = _ensure_table_styles(result["html_content"])
                 result["html_content"] = _highlight_check_needed(result["html_content"])
+                # ⭐ 네이버용 최종 포맷팅: 가운데 정렬 + 폰트 + 상단 고정 인사말
+                result["html_content"] = _apply_naver_formatting(result["html_content"])
 
             # 카톡 요약에 구글맵 위치 링크 자동 추가
             if result.get("summary_for_chat"):
