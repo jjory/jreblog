@@ -551,6 +551,12 @@ def _restore_session_if_needed():
     if not sid:
         return
 
+    # 분석/생성을 한 번이라도 한 세션이면 복원하지 않음
+    # (새 분석 결과를 디스크의 옛 데이터가 덮어쓰는 버그 방지)
+    if st.session_state.get("_analysis_done_this_session"):
+        st.session_state["_session_restored"] = True
+        return
+
     # 새로고침 직후엔 session_state가 비어 있음
     # 디스크에서 복원 시도
     saved = load_session(sid)
@@ -563,8 +569,11 @@ def _restore_session_if_needed():
     st.session_state["_session_restored"] = True
 
 
-def _persist_session():
-    """현재 작업 상태를 디스크에 자동 저장."""
+def _persist_session(overwrite: bool = False):
+    """현재 작업 상태를 디스크에 자동 저장.
+    overwrite=True면 properties가 없어도 빈 값으로 덮어써서
+    옛 데이터가 남지 않게 함.
+    """
     sid = st.query_params.get("sid", "")
     if not sid:
         return
@@ -575,7 +584,7 @@ def _persist_session():
     if st.session_state.get("blog_posts"):
         data["blog_posts"] = st.session_state["blog_posts"]
 
-    if data:
+    if data or overwrite:
         save_session(sid, data)
 
 
@@ -1723,8 +1732,10 @@ with tab1:
             if properties:
                 st.session_state["properties"] = properties
                 st.session_state.pop("blog_posts", None)
-                # 디스크에 자동 저장 (새로고침 대비)
-                _persist_session()
+                # 이 세션에서 분석을 했음을 표시 (복원이 덮어쓰지 못하게)
+                st.session_state["_analysis_done_this_session"] = True
+                # 디스크에 자동 저장 (새 결과로 덮어쓰기)
+                _persist_session(overwrite=True)
                 st.success(
                     f"✅ {len(properties)}개 도면 분석 완료! 2번 탭에서 확인하세요."
                 )
@@ -1748,11 +1759,21 @@ with tab2:
         for idx, prop in enumerate(properties):
             data = prop["data"]
             station = data.get("nearest_station") or {}
+            # 제목: 파일명(일본어 PDF명) 대신 핵심 정보로 표시 + 관리비 포함
+            _rent = data.get("rent_yen", 0) or 0
+            _mgmt = data.get("management_fee_yen", 0) or 0
+            _layout = data.get("layout", "?")
+            if _mgmt > 0:
+                _price_label = f"월세 ¥{_rent:,} + 관리비 ¥{_mgmt:,}"
+            else:
+                _price_label = f"월세 ¥{_rent:,}"
+            _prop_num = prop.get("property_number", "")
+            _num_label = f"[{_prop_num}] " if _prop_num else ""
             with st.expander(
-                f"📄 {idx+1}. {prop['filename']}  —  "
-                f"{data.get('layout', '?')} / ¥{data.get('rent_yen', 0):,}",
+                f"📄 {idx+1}. {_num_label}{_layout} / {_price_label}",
                 expanded=(idx == 0),
             ):
+                st.caption(f"📁 원본 파일: {prop['filename']}")
                 col1, col2, col3 = st.columns([2, 2, 1])
                 with col1:
                     st.markdown(
