@@ -98,50 +98,76 @@ OUTPUT_FOLDER_PATH = (
 # ─────────────────────────────────────────────────
 # 통계 분석 헬퍼 — 이력 데이터에서 정보 추출
 # ─────────────────────────────────────────────────
+def _extract_property_number(filename: str) -> str:
+    """파일명 앞 7자리 숫자를 매물번호로 추출. '1234567_도면.jpg' → '1234567'"""
+    if not filename:
+        return ""
+    m = re.match(r"^(\d{7})", filename.strip())
+    if m:
+        return m.group(1)
+    return ""
+
+
 def _extract_ward(title: str) -> str:
-    """제목에서 구 추출. 표준 제목: '[이타바시구][도부토조선][도부네리마]역 ...'"""
+    """제목에서 구/시 추출. 실제 제목: '이타바시구 도부토조선 나리마스역 도보 5분 ...'
+    또는 매물번호가 앞에 붙은 경우: '[1234567] 이타바시구 ...' """
     if not title:
         return "기타"
-    m = re.match(r"\[([^\]]+)\]", title)
-    if not m:
-        return "기타"
-    return m.group(1)
+    # 매물번호 [숫자] 제거
+    t = re.sub(r"^\[\d+\]\s*", "", title.strip())
+    # 첫 단어가 '~구' 또는 '~시'로 끝나면 그것이 지역
+    m = re.match(r"^([가-힣]+(?:구|시|정|초|쿠))", t)
+    if m:
+        return m.group(1)
+    # fallback: 첫 단어
+    first_word = t.split()[0] if t.split() else ""
+    return first_word if first_word else "기타"
 
 
 def _extract_line(title: str) -> str:
-    """제목에서 노선 추출. 표준 제목 2번째 [...]."""
+    """제목에서 노선 추출. 실제 제목: '이타바시구 도부토조선 나리마스역 ...'
+    구 다음 ~선/~라인으로 끝나는 단어."""
     if not title:
         return "기타"
-    matches = re.findall(r"\[([^\]]+)\]", title)
-    if len(matches) >= 2:
-        return matches[1]
+    t = re.sub(r"^\[\d+\]\s*", "", title.strip())
+    # ~선 또는 ~라인으로 끝나는 단어 찾기 (역 앞)
+    m = re.search(r"([\w가-힣]+(?:선|라인|Line))\s+[\w가-힣]+역", t)
+    if m:
+        return m.group(1)
+    # JR 야마노테선 같은 복합 노선
+    m2 = re.search(r"(JR\s*[\w가-힣]+선)", t)
+    if m2:
+        return m2.group(1).replace(" ", "")
     return "기타"
 
 
 def _extract_station(title: str) -> str:
-    """제목에서 역명 추출. 표준 제목 3번째 [...]."""
+    """제목에서 역명 추출. 실제 제목: '... 나리마스역 도보 5분 ...'
+    ~역으로 끝나는 단어 (역 글자 제외)."""
     if not title:
         return "기타"
-    matches = re.findall(r"\[([^\]]+)\]", title)
-    if len(matches) >= 3:
-        return matches[2]
+    t = re.sub(r"^\[\d+\]\s*", "", title.strip())
+    # ~역 패턴 (역명만 추출)
+    m = re.search(r"([\w가-힣]+)역", t)
+    if m:
+        return m.group(1)
     return "기타"
 
 
 def _extract_rent(title: str) -> int:
-    """제목에서 월세 추출 (엔 단위). '월세¥80,000+관리비¥5,000' → 80000 + 5000 = 85000"""
+    """제목에서 월세 추출 (엔 단위). '월세 ¥80,000+관리비 ¥5,000' → 85000"""
     if not title:
         return 0
     total = 0
-    # 월세¥XX,XXX
-    m_rent = re.search(r"월세[¥￥]\s*([\d,]+)", title)
+    # 월세 ¥XX,XXX (공백 허용)
+    m_rent = re.search(r"월세\s*[¥￥]\s*([\d,]+)", title)
     if m_rent:
         try:
             total += int(m_rent.group(1).replace(",", ""))
         except ValueError:
             pass
-    # 관리비¥X,XXX
-    m_mgmt = re.search(r"관리비[¥￥]\s*([\d,]+)", title)
+    # 관리비 ¥X,XXX (공백 허용)
+    m_mgmt = re.search(r"관리비\s*[¥￥]\s*([\d,]+)", title)
     if m_mgmt:
         try:
             total += int(m_mgmt.group(1).replace(",", ""))
@@ -151,10 +177,10 @@ def _extract_rent(title: str) -> int:
 
 
 def _extract_room_type(title: str) -> str:
-    """제목에서 방구조 추출. '도보5분 1K 월세¥...' → '1K'"""
+    """제목에서 방구조 추출. '도보 5분 1K 월세...' → '1K'"""
     if not title:
         return "기타"
-    # 도보N분 [방구조] 월세 패턴
+    # 도보 N분 [방구조] 월세 패턴 (공백 허용)
     m = re.search(r"도보\s*\d+\s*분\s+([\w\d]+)\s+월세", title)
     if m:
         return m.group(1)
@@ -939,6 +965,53 @@ with st.sidebar:
     with st.expander("📈 직원별 작업 통계", expanded=False):
         _render_staff_stats()
 
+    # ─── 📥 Excel 리포트 다운로드 (모든 사용자) ───
+    with st.expander("📥 Excel 리포트 다운로드", expanded=False):
+        st.caption("💡 전체 매물 이력 + 통계 요약 Excel")
+        try:
+            _sb_history = load_history()
+            for _h in _sb_history:
+                if not _h.get("user_email"):
+                    _h["user_email"] = ADMIN_EMAIL
+            excel_bytes = _build_excel_report(_sb_history)
+            if excel_bytes:
+                st.download_button(
+                    f"📊 다운로드 ({len(_sb_history)}건)",
+                    excel_bytes,
+                    file_name=f"JRE_매물이력_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+            else:
+                st.warning("⚠️ openpyxl 미설치")
+        except Exception as e:
+            st.error(f"Excel 생성 실패: {e}")
+
+    # ─── 🗑 오래된 이력 정리 (관리자 전용 — 삭제는 신중하게) ───
+    if is_admin:
+        with st.expander("🗑 오래된 이력 일괄 정리 (관리자)", expanded=False):
+            st.caption("💡 즐겨찾기(⭐)는 삭제되지 않습니다.")
+            months_to_clean = st.slider(
+                "몇 개월 이상 삭제?",
+                min_value=1, max_value=24, value=12, step=1,
+                key="cleanup_months_slider_sidebar",
+            )
+            confirm_key = f"_confirm_cleanup_sb_{months_to_clean}"
+            if st.button(
+                f"🗑 {months_to_clean}개월+ 삭제",
+                type="secondary",
+                use_container_width=True,
+                key=f"cleanup_btn_sb_{months_to_clean}",
+            ):
+                if st.session_state.get(confirm_key):
+                    deleted = delete_old_history(months_to_clean)
+                    st.session_state.pop(confirm_key, None)
+                    st.success(f"✅ {deleted}건 삭제 완료 (즐겨찾기 보호)")
+                    st.rerun()
+                else:
+                    st.session_state[confirm_key] = True
+                    st.warning("⚠️ 한 번 더 클릭하면 삭제됩니다.")
+
     st.divider()
     st.caption(
         "💡 **사용 안내**\n\n"
@@ -988,13 +1061,13 @@ def _generate_worker(property_data, target_visa, style_name, custom_instructions
 # 4단계 탭
 # ─────────────────────────────────────────────────
 # ───── 작업 이력 보관함 (메인 페이지 상단 expander) ─────
-# ───── 작업 이력 보관함 (메인 페이지 상단 expander) ─────
-# Expander 제목에 이력 건수·용량을 동적으로 표시 (펼치지 않고도 확인 가능)
+# Expander 제목에 이력 건수·용량·최근·오래된을 모두 표시 (펼치지 않고도 확인 가능)
 try:
     _hist_preview = load_history()
     # 작업 이력은 모든 사용자가 공유 (관리자/사용자 구분 없음)
     _hist_count = len(_hist_preview)
 except Exception:
+    _hist_preview = []
     _hist_count = 0
 
 # 파일 크기 계산 (모든 사용자에게 표시)
@@ -1013,14 +1086,32 @@ try:
 except Exception:
     _hist_size = ""
 
-# Expander 제목 — 모든 사용자 동일 (작업 이력은 회사 공유)
+# 최근 작업 / 가장 오래된 계산 (제목에 표시)
+_hist_latest = ""
+_hist_oldest = ""
+try:
+    if _hist_preview:
+        _latest_ts = datetime.fromisoformat(_hist_preview[0]["timestamp"])
+        _hist_latest = _latest_ts.strftime("%m/%d %H:%M")
+        _oldest_ts = datetime.fromisoformat(_hist_preview[-1]["timestamp"])
+        _days_old = (datetime.now() - _oldest_ts).days
+        _hist_oldest = f"{_days_old}일전" if _days_old > 0 else "오늘"
+except Exception:
+    pass
+
+# Expander 제목 — 4가지 정보 모두 표시 (건수·용량·최근·오래된)
 _label_prefix = "📚 작업 이력 보관함"
 if _hist_count == 0:
     _expander_label = f"{_label_prefix} (비어 있음 · 클릭하여 펼치기)"
-elif _hist_size:
-    _expander_label = f"{_label_prefix} ({_hist_count}건 · {_hist_size} · 클릭하여 펼치기)"
 else:
-    _expander_label = f"{_label_prefix} ({_hist_count}건 · 클릭하여 펼치기)"
+    _parts = [f"{_hist_count}건"]
+    if _hist_size:
+        _parts.append(_hist_size)
+    if _hist_latest:
+        _parts.append(f"🆕{_hist_latest}")
+    if _hist_oldest:
+        _parts.append(f"🗓{_hist_oldest}")
+    _expander_label = f"{_label_prefix} ({' · '.join(_parts)} · 클릭하여 펼치기)"
 
 with st.expander(_expander_label, expanded=False):
     st.caption(
@@ -1048,149 +1139,15 @@ with st.expander(_expander_label, expanded=False):
             "1·2번 탭에서 블로그를 생성하면 자동으로 여기에 저장됩니다."
         )
     else:
-        # 통계 표시 (4개 칸: 건수·용량·최근·오래된)
-        col_s1, col_s2, col_s3, col_s4 = st.columns(4)
-        with col_s1:
-            st.metric("📊 총 이력", f"{len(history)}건")
-        with col_s2:
-            st.metric("💾 저장 용량", _hist_size)
-        with col_s3:
-            try:
-                latest_ts = datetime.fromisoformat(history[0]["timestamp"])
-                latest_str = latest_ts.strftime("%m-%d %H:%M")
-            except Exception:
-                latest_str = "?"
-            st.metric("🆕 최근 작업", latest_str)
-        with col_s4:
-            try:
-                oldest_ts = datetime.fromisoformat(history[-1]["timestamp"])
-                days_old = (datetime.now() - oldest_ts).days
-                oldest_str = f"{days_old}일 전"
-            except Exception:
-                oldest_str = "?"
-            st.metric("🗓 가장 오래된", oldest_str)
-
-        st.divider()
-
-        # ===== 📊 통계 대시보드 (중첩 expander, 펼침 기본) =====
-        with st.expander("📊 통계 대시보드 (펼치기)", expanded=True):
-            # 1) 월별 차트
-            st.markdown("**📅 월별 매물 생성 추이**")
-            by_month = _aggregate_by_month(history)
-            if by_month:
-                st.bar_chart(by_month, height=200)
-            else:
-                st.caption("데이터 없음")
-
-            # 2) 최근 30일 일별 차트
-            st.markdown("**📆 최근 30일 일별 추이**")
-            by_day = _aggregate_by_day(history, days=30)
-            if by_day:
-                st.bar_chart(by_day, height=200)
-            else:
-                st.caption("최근 30일 데이터 없음")
-
-            # 3) 월세 통계
-            st.markdown("**💰 월세+관리비 통계**")
-            rent_stats = _calc_rent_stats(history)
-            if rent_stats["count"] > 0:
-                rcol1, rcol2, rcol3, rcol4 = st.columns(4)
-                rcol1.metric("평균", _format_yen(rent_stats["avg"]))
-                rcol2.metric("중앙값", _format_yen(rent_stats["median"]))
-                rcol3.metric("최저", _format_yen(rent_stats["min"]))
-                rcol4.metric("최고", _format_yen(rent_stats["max"]))
-                st.caption(f"※ 월세 정보가 표준 제목 형식인 {rent_stats['count']}건 기준")
-            else:
-                st.caption("월세 정보 추출 가능한 매물 없음")
-
-            # 4) 구별·노선별·역별 분포 (3열)
-            d_col1, d_col2, d_col3 = st.columns(3)
-            with d_col1:
-                st.markdown("**🏷 구별 분포**")
-                by_ward = _aggregate_by_ward(history)
-                if by_ward:
-                    for ward, cnt in list(by_ward.items())[:10]:
-                        bar = "▓" * min(cnt, 20)
-                        st.markdown(f"`{ward[:8]:<10}` {bar} **{cnt}건**")
-                else:
-                    st.caption("데이터 없음")
-
-            with d_col2:
-                st.markdown("**🚆 노선 TOP 10**")
-                by_line = _aggregate_by_line(history, 10)
-                if by_line:
-                    for line, cnt in by_line.items():
-                        bar = "▓" * min(cnt, 20)
-                        st.markdown(f"`{line[:10]:<12}` {bar} **{cnt}건**")
-                else:
-                    st.caption("데이터 없음")
-
-            with d_col3:
-                st.markdown("**🚉 역 TOP 10**")
-                by_station = _aggregate_by_station(history, 10)
-                if by_station:
-                    for station, cnt in by_station.items():
-                        bar = "▓" * min(cnt, 20)
-                        st.markdown(f"`{station[:8]:<10}` {bar} **{cnt}건**")
-                else:
-                    st.caption("데이터 없음")
-
-        # ===== 🗑 이력 정리 (오래된 이력 일괄 삭제) =====
-        with st.expander("🗑 N개월 이상 된 이력 일괄 정리 (즐겨찾기 보호)", expanded=False):
-            st.caption("💡 즐겨찾기(⭐)로 표시된 매물은 삭제되지 않습니다.")
-            cleanup_col1, cleanup_col2 = st.columns([3, 1])
-            with cleanup_col1:
-                months_to_clean = st.slider(
-                    "몇 개월 이상 된 이력을 삭제할까요?",
-                    min_value=1,
-                    max_value=24,
-                    value=12,
-                    step=1,
-                    key="cleanup_months_slider",
-                )
-            with cleanup_col2:
-                st.markdown("&nbsp;", unsafe_allow_html=True)  # 위아래 정렬용
-                confirm_key = f"_confirm_cleanup_{months_to_clean}"
-                if st.button(
-                    f"🗑 {months_to_clean}개월+ 삭제",
-                    type="secondary",
-                    use_container_width=True,
-                    key=f"cleanup_btn_{months_to_clean}",
-                ):
-                    if st.session_state.get(confirm_key):
-                        deleted = delete_old_history(months_to_clean)
-                        st.session_state.pop(confirm_key, None)
-                        st.success(f"✅ {deleted}건의 오래된 이력 삭제 완료 (즐겨찾기 보호됨)")
-                        st.rerun()
-                    else:
-                        st.session_state[confirm_key] = True
-                        st.warning("⚠️ 한 번 더 클릭하면 삭제됩니다.")
-
-        # ===== 📥 Excel 리포트 다운로드 =====
-        with st.expander("📥 Excel 리포트 다운로드 (전체 이력 + 통계)", expanded=False):
-            st.caption("💡 매물 이력 전체 + 통계 요약을 Excel 파일로 다운로드합니다.")
-            try:
-                excel_bytes = _build_excel_report(history)
-                if excel_bytes:
-                    st.download_button(
-                        f"📊 Excel 리포트 다운로드 ({len(history)}건)",
-                        excel_bytes,
-                        file_name=f"JRE_매물이력_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True,
-                    )
-                else:
-                    st.warning("⚠️ Excel 생성 라이브러리(openpyxl)가 설치되지 않았습니다.")
-            except Exception as e:
-                st.error(f"Excel 생성 실패: {e}")
-
-        st.divider()
+        # 통계는 expander 제목에 표시됨 (건수·용량·최근·오래된)
+        # 상세 통계는 사이드바 "📊 회사 전체 통계"에서 확인
+        # N개월 정리·Excel 리포트는 사이드바로 이동됨
 
         # 검색
         search_q = st.text_input(
-            "🔍 검색 (제목·파일명)",
+            "🔍 검색 (매물번호·제목·파일명)",
             key="hist_search_v2",
-            placeholder="예: 신주쿠, 1K, japanreal2_1.jpg",
+            placeholder="예: 1234567, 신주쿠, 1K",
         )
 
         # ⭐ 즐겨찾기 필터
@@ -1200,7 +1157,7 @@ with st.expander(_expander_label, expanded=False):
             value=False,
         )
 
-        # 필터링
+        # 필터링 (매물번호·제목·파일명)
         filtered = history
         if search_q:
             q = search_q.lower()
@@ -1208,6 +1165,7 @@ with st.expander(_expander_label, expanded=False):
                 h for h in filtered
                 if q in h.get("title", "").lower()
                 or q in h.get("filename", "").lower()
+                or q in h.get("property_number", "").lower()
             ]
         if only_favorites:
             filtered = [h for h in filtered if h.get("favorite")]
@@ -1238,8 +1196,12 @@ with st.expander(_expander_label, expanded=False):
                 hid = h.get("id", "")
                 title = h.get("title", "(제목 없음)")
                 filename = h.get("filename", "")
+                prop_num = h.get("property_number", "")
                 timestamp = h.get("timestamp", "")
                 is_fav = h.get("favorite", False)
+
+                # 제목에 이미 [매물번호]가 포함됐는지 확인 (중복 방지)
+                title_has_num = prop_num and title.startswith(f"[{prop_num}]")
 
                 # 표시용 시간 포맷
                 try:
@@ -1275,8 +1237,13 @@ with st.expander(_expander_label, expanded=False):
 
                 with col_info:
                     fav_badge = " ⭐" if is_fav else ""
+                    # 순번 다음에 매물번호 표시 (제목에 이미 있으면 제목만)
+                    if prop_num and not title_has_num:
+                        display_title = f"**{idx+1}. [{prop_num}] {title}**{fav_badge}"
+                    else:
+                        display_title = f"**{idx+1}. {title}**{fav_badge}"
                     st.markdown(
-                        f"**{idx+1}. {title}**{fav_badge}  \n"
+                        f"{display_title}  \n"
                         f"<span style='color:#888;font-size:13px'>"
                         f"📁 {filename} · 🕒 {ts_display}{retention_warn}</span>",
                         unsafe_allow_html=True,
@@ -1626,6 +1593,11 @@ tab1, tab2, tab3, tab4 = st.tabs(
 with tab1:
     st.subheader(f"마이소크 (物件図面) 업로드 — 한 번에 최대 {MAX_UPLOADS}개")
     st.caption("지원 형식: JPG · PNG · WEBP · GIF · PDF")
+    st.info(
+        "📌 **매물번호 안내**: 파일명 맨 앞에 **7자리 숫자**를 붙여주세요.\n\n"
+        "예: `1234567_매물도면.jpg` → 매물번호 **1234567**\n\n"
+        "매물번호는 블로그 제목·이력 보관함·검색에 사용됩니다."
+    )
 
     uploaded_files = st.file_uploader(
         f"도면 파일을 최대 {MAX_UPLOADS}개까지 선택하세요",
@@ -1637,6 +1609,19 @@ with tab1:
         if len(uploaded_files) > MAX_UPLOADS:
             st.warning(f"⚠️ 최대 {MAX_UPLOADS}개까지만 처리됩니다.")
             uploaded_files = uploaded_files[:MAX_UPLOADS]
+
+        # 매물번호 미인식 파일 경고
+        no_number_files = [
+            uf.name for uf in uploaded_files
+            if not _extract_property_number(uf.name)
+        ]
+        if no_number_files:
+            st.warning(
+                "⚠️ **다음 파일은 7자리 매물번호가 인식되지 않았습니다:**\n\n"
+                + "\n".join(f"- {n}" for n in no_number_files)
+                + "\n\n매물번호 없이도 진행되지만, 파일명 앞에 7자리 숫자를 "
+                "붙이는 것을 권장합니다. (예: `1234567_원래파일명.jpg`)"
+            )
 
         st.write(f"**업로드된 파일: {len(uploaded_files)}개**")
         cols = st.columns(min(len(uploaded_files), MAX_UPLOADS))
@@ -1672,6 +1657,7 @@ with tab1:
                         data = future.result()
                         properties.append({
                             "filename": name,
+                            "property_number": _extract_property_number(name),
                             "data": data,
                             "style": default_style,  # 기본 스타일
                         })
@@ -1820,9 +1806,20 @@ with tab2:
                 for future in as_completed(future_to_idx):
                     i = future_to_idx[future]
                     name = properties[i]["filename"]
+                    prop_num = properties[i].get("property_number", "")
                     try:
                         post = future.result()
-                        blog_posts[i] = {"filename": name, "post": post}
+                        # 매물번호를 제목 앞에 붙이기 (있는 경우)
+                        if prop_num:
+                            original_title = post.get("title", "")
+                            # 이미 [번호]가 있으면 중복 방지
+                            if not original_title.startswith(f"[{prop_num}]"):
+                                post["title"] = f"[{prop_num}] {original_title}"
+                        blog_posts[i] = {
+                            "filename": name,
+                            "property_number": prop_num,
+                            "post": post,
+                        }
                     except Exception as e:
                         errors.append(format_error_korean(e, name))
                     done += 1
@@ -1842,6 +1839,7 @@ with tab2:
                     post = bp["post"]
                     new_history_items.append({
                         "filename": bp["filename"],
+                        "property_number": bp.get("property_number", ""),
                         "title": post.get("title", ""),
                         "summary_for_chat": post.get("summary_for_chat", ""),
                         "html_content": post.get("html_content", ""),
