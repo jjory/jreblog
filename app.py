@@ -37,11 +37,8 @@ from src.generator import (
     VISA_LABELS,
     build_naver_smarteditor_html,
     generate_blog_post,
-    generate_sns_content,
-    format_sns_for_display,
     list_available_styles,
 )
-from src.naver_publisher import NaverCafeClient, format_publish_error_korean
 from src.persistence import (
     load_history,
     add_to_history,
@@ -1113,532 +1110,13 @@ def _generate_worker(property_data, target_visa, style_name, custom_instructions
 # ─────────────────────────────────────────────────
 # 4단계 탭
 # ─────────────────────────────────────────────────
-# ───── 작업 이력 보관함 (메인 페이지 상단 expander) ─────
-# Expander 제목에 이력 건수·용량·최근·오래된을 모두 표시 (펼치지 않고도 확인 가능)
-try:
-    _hist_preview = load_history()
-    # 작업 이력은 모든 사용자가 공유 (관리자/사용자 구분 없음)
-    _hist_count = len(_hist_preview)
-except Exception:
-    _hist_preview = []
-    _hist_count = 0
-
-# 파일 크기 계산 (모든 사용자에게 표시)
-try:
-    from src.persistence import HISTORY_FILE
-    if HISTORY_FILE.exists():
-        _hist_bytes = HISTORY_FILE.stat().st_size
-        if _hist_bytes < 1024:
-            _hist_size = f"{_hist_bytes}B"
-        elif _hist_bytes < 1024 * 1024:
-            _hist_size = f"{_hist_bytes/1024:.1f}KB"
-        else:
-            _hist_size = f"{_hist_bytes/(1024*1024):.2f}MB"
-    else:
-        _hist_size = "0B"
-except Exception:
-    _hist_size = ""
-
-# 최근 작업 / 가장 오래된 계산 (제목에 표시)
-_hist_latest = ""
-_hist_oldest = ""
-try:
-    if _hist_preview:
-        _latest_ts = datetime.fromisoformat(_hist_preview[0]["timestamp"])
-        _hist_latest = _latest_ts.strftime("%m/%d %H:%M")
-        _oldest_ts = datetime.fromisoformat(_hist_preview[-1]["timestamp"])
-        _days_old = (datetime.now() - _oldest_ts).days
-        _hist_oldest = f"{_days_old}일전" if _days_old > 0 else "오늘"
-except Exception:
-    pass
-
-# Expander 제목 — 4가지 정보 모두 표시 (건수·용량·최근·오래된)
-_label_prefix = "📚 작업 이력 보관함"
-if _hist_count == 0:
-    _expander_label = f"{_label_prefix} (비어 있음 · 클릭하여 펼치기)"
-else:
-    _parts = [f"{_hist_count}건"]
-    if _hist_size:
-        _parts.append(_hist_size)
-    if _hist_latest:
-        _parts.append(f"🆕{_hist_latest}")
-    if _hist_oldest:
-        _parts.append(f"🗓{_hist_oldest}")
-    _expander_label = f"{_label_prefix} ({' · '.join(_parts)} · 클릭하여 펼치기)"
-
-with st.expander(_expander_label, expanded=False):
-    st.caption(
-        "💡 회사 전체 매물 이력이 자동 저장됩니다. "
-        "**영구 보존** · 모든 사용자가 공유 · 수동 삭제 전까지 안 사라집니다."
-    )
-
-    # 이력 로드 (실패해도 빈 리스트 반환) — 모든 사용자가 전체 이력 조회
-    try:
-        history_all = load_history()
-        # 기존 이력 (user_email 없음) → admin@win-bro.com 작성으로 처리
-        for h in history_all:
-            if not h.get("user_email"):
-                h["user_email"] = ADMIN_EMAIL
-        # 작업 이력은 회사 공유: 모든 사용자가 전체 이력 조회
-        history = history_all
-    except Exception as e:
-        st.error(f"⚠️ 이력 로드 중 에러: {e}")
-        history = []
-        history_all = []
-
-    if not history:
-        st.info(
-            "아직 저장된 이력이 없습니다.\n\n"
-            "1·2번 탭에서 블로그를 생성하면 자동으로 여기에 저장됩니다."
-        )
-    else:
-        # 통계는 expander 제목에 표시됨 (건수·용량·최근·오래된)
-        # 상세 통계는 사이드바 "📊 회사 전체 통계"에서 확인
-        # N개월 정리·Excel 리포트는 사이드바로 이동됨
-
-        # 검색
-        search_q = st.text_input(
-            "🔍 검색 (매물번호·제목·파일명)",
-            key="hist_search_v2",
-            placeholder="예: 1234567, 신주쿠, 1K",
-        )
-
-        # ⭐ 즐겨찾기 필터
-        only_favorites = st.checkbox(
-            "⭐ 즐겨찾기만 보기",
-            key="hist_only_favorites_v2",
-            value=False,
-        )
-
-        # 필터링 (매물번호·제목·파일명)
-        filtered = history
-        if search_q:
-            q = search_q.lower()
-            filtered = [
-                h for h in filtered
-                if q in h.get("title", "").lower()
-                or q in h.get("filename", "").lower()
-                or q in h.get("property_number", "").lower()
-            ]
-        if only_favorites:
-            filtered = [h for h in filtered if h.get("favorite")]
-
-        if not filtered:
-            st.warning(f"'{search_q}' 검색 결과 없음")
-        else:
-            st.markdown(f"**검색 결과: {len(filtered)}건**")
-
-            # 선택 삭제 모드
-            col_btn1, col_btn2 = st.columns([1, 5])
-            with col_btn1:
-                if st.button("☑️ 모두 선택", use_container_width=True):
-                    for h in filtered:
-                        st.session_state[f"hist_sel_{h['id']}"] = True
-                    st.rerun()
-            with col_btn2:
-                if st.button("⬜ 모두 해제", use_container_width=True):
-                    for h in filtered:
-                        st.session_state[f"hist_sel_{h['id']}"] = False
-                    st.rerun()
-
-            st.divider()
-
-            # 이력 목록 표시
-            selected_ids = []
-            for idx, h in enumerate(filtered):
-                hid = h.get("id", "")
-                title = h.get("title", "(제목 없음)")
-                filename = h.get("filename", "")
-                prop_num = h.get("property_number", "")
-                timestamp = h.get("timestamp", "")
-                is_fav = h.get("favorite", False)
-
-                # 제목에 이미 [매물번호]가 포함됐는지 확인 (중복 방지)
-                title_has_num = prop_num and title.startswith(f"[{prop_num}]")
-
-                # 표시용 시간 포맷
-                try:
-                    ts_obj = datetime.fromisoformat(timestamp)
-                    ts_display = ts_obj.strftime("%Y-%m-%d %H:%M")
-                    # ⭐ 영구 보존이라 자동 삭제 경고 없음
-                    retention_warn = ""
-                except Exception:
-                    ts_display = timestamp
-                    retention_warn = ""
-
-                # 체크박스 + 즐겨찾기 + 제목
-                col_chk, col_fav, col_info = st.columns([0.5, 0.5, 9])
-                with col_chk:
-                    checked = st.checkbox(
-                        " ",
-                        key=f"hist_sel_{hid}",
-                        label_visibility="collapsed",
-                    )
-                    if checked:
-                        selected_ids.append(hid)
-
-                with col_fav:
-                    fav_icon = "⭐" if is_fav else "☆"
-                    if st.button(
-                        fav_icon,
-                        key=f"hist_fav_{hid}",
-                        help="즐겨찾기 토글",
-                        use_container_width=True,
-                    ):
-                        toggle_favorite(hid)
-                        st.rerun()
-
-                with col_info:
-                    fav_badge = " ⭐" if is_fav else ""
-                    # 순번 다음에 매물번호 표시 (제목에 이미 있으면 제목만)
-                    if prop_num and not title_has_num:
-                        display_title = f"**{idx+1}. [{prop_num}] {title}**{fav_badge}"
-                    else:
-                        display_title = f"**{idx+1}. {title}**{fav_badge}"
-                    st.markdown(
-                        f"{display_title}  \n"
-                        f"<span style='color:#888;font-size:13px'>"
-                        f"📁 {filename} · 🕒 {ts_display}{retention_warn}</span>",
-                        unsafe_allow_html=True,
-                    )
-
-                # 카톡 요약 표시 (접힘 상태가 기본)
-                summary = h.get("summary_for_chat", "")
-                if summary:
-                    with st.expander("📱 카카오톡용 요약 보기", expanded=False):
-                        st.code(summary, language=None, wrap_lines=True)
-
-                # 추가 작업: 본문 + 다운로드 (펼침)
-                with st.expander("📄 본문 HTML + 해시태그 + 다운로드", expanded=False):
-                    html = h.get("html_content", "")
-                    if html:
-                        st.markdown(html, unsafe_allow_html=True)
-                    tags = h.get("hashtags", [])
-                    if tags:
-                        st.markdown("**해시태그**")
-                        st.code(" ".join(tags), language=None)
-
-                    # 다운로드 버튼들
-                    dl_col1, dl_col2 = st.columns(2)
-                    with dl_col1:
-                        st.download_button(
-                            "💾 HTML 다운로드",
-                            build_naver_smarteditor_html({
-                                "title": title,
-                                "html_content": html,
-                                "hashtags": tags,
-                            }),
-                            file_name=f"history_{hid}_{Path(filename).stem}.html",
-                            mime="text/html",
-                            key=f"hist_dl_html_{hid}",
-                            use_container_width=True,
-                        )
-                    with dl_col2:
-                        st.download_button(
-                            "📋 JSON 다운로드",
-                            json.dumps(h, ensure_ascii=False, indent=2),
-                            file_name=f"history_{hid}.json",
-                            mime="application/json",
-                            key=f"hist_dl_json_{hid}",
-                            use_container_width=True,
-                        )
-
-                st.divider()
-
-            # 선택 삭제 + 전체 삭제 버튼
-            st.markdown("---")
-            col_d1, col_d2, col_d3 = st.columns([2, 2, 6])
-            with col_d1:
-                if st.button(
-                    f"🗑️ 선택 항목 삭제 ({len(selected_ids)}개)",
-                    type="primary",
-                    disabled=(len(selected_ids) == 0),
-                    use_container_width=True,
-                ):
-                    delete_from_history(selected_ids)
-                    # 선택 상태 초기화
-                    for sid in selected_ids:
-                        st.session_state.pop(f"hist_sel_{sid}", None)
-                    st.success(f"✅ {len(selected_ids)}개 항목 삭제 완료")
-                    st.rerun()
-
-            with col_d2:
-                if st.button(
-                    "🗑️ 전체 삭제",
-                    type="secondary",
-                    use_container_width=True,
-                ):
-                    if st.session_state.get("_confirm_clear_all"):
-                        clear_history()
-                        st.session_state.pop("_confirm_clear_all", None)
-                        st.success("✅ 모든 이력 삭제 완료")
-                        st.rerun()
-                    else:
-                        st.session_state["_confirm_clear_all"] = True
-                        st.warning("⚠️ 한 번 더 클릭하면 모든 이력이 삭제됩니다.")
-
-            with col_d3:
-                # 전체 백업 다운로드
-                if filtered:
-                    st.download_button(
-                        f"📥 전체 백업 다운로드 ({len(history)}건 JSON)",
-                        json.dumps(history, ensure_ascii=False, indent=2),
-                        file_name=f"jre_history_backup_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
-                        mime="application/json",
-                        use_container_width=True,
-                    )
-
-
-
-# ───── 📱 SNS·쇼츠 콘텐츠 자동 생성 (메인 페이지 상단 expander) ─────
-# 5번 탭이 아니라 expander로 만들어 Streamlit st.tabs() 마지막 탭 버그 회피.
-# 결과 표시는 라디오 버튼으로 (중첩 st.tabs 회피).
-# 결과는 session_state에만 저장 (페이지 새로고침 시 사라짐).
-_sns_blog_posts = st.session_state.get("blog_posts") or []
-_sns_label_count = f"({len(_sns_blog_posts)}개 매물 준비)" if _sns_blog_posts else "(블로그 미생성)"
-_sns_expander_label = f"📱 SNS·쇼츠 콘텐츠 자동 생성 {_sns_label_count} (클릭하여 펼치기)"
-
-with st.expander(_sns_expander_label, expanded=False):
-    st.caption(
-        "💡 블로그 생성된 매물을 바탕으로 **인스타 캡션·카톡 메시지·유튜브 쇼츠 스크립트**를 "
-        "자동 생성합니다."
-    )
-
-    # ⚠️ 비용 안내 강화 — 예상 비용 표시
-    if _sns_blog_posts:
-        expected_cost = len(_sns_blog_posts) * 240
-        st.warning(
-            f"💰 **예상 비용**: 매물당 약 240원 (Opus 기준) · "
-            f"현재 {len(_sns_blog_posts)}건 모두 생성 시 약 **{expected_cost:,}원**"
-        )
-
-    if not _sns_blog_posts:
-        st.info(
-            "👈 먼저 **1·2번 탭**에서 매물을 분석하고 블로그를 생성하세요.\n\n"
-            "블로그 생성된 매물만 SNS 콘텐츠 생성 가능합니다."
-        )
-    else:
-        # SNS 콘텐츠는 별도 session_state에 저장 (블로그와 분리)
-        if "sns_contents" not in st.session_state:
-            st.session_state["sns_contents"] = {}
-
-        sns_contents = st.session_state["sns_contents"]
-
-        # 일괄 생성 버튼
-        not_yet = [
-            (idx, bp) for idx, bp in enumerate(_sns_blog_posts)
-            if f"{bp['filename']}_{idx}" not in sns_contents
-        ]
-
-        st.markdown("### ⚡ 한꺼번에 생성")
-        if not not_yet:
-            st.success("✅ 모든 매물의 SNS 콘텐츠가 이미 생성되었습니다.")
-        else:
-            batch_cost = len(not_yet) * 240
-            if st.button(
-                f"🚀 미생성 {len(not_yet)}개 매물 SNS 생성 (예상 비용 {batch_cost:,}원)",
-                type="primary",
-                use_container_width=True,
-                key="sns_batch_generate_btn",
-            ):
-                progress = st.progress(0.0, text="시작...")
-                total = len(not_yet)
-                gen_errors = []
-
-                for i, (idx, bp) in enumerate(not_yet):
-                    filename = bp["filename"]
-                    title = bp["post"].get("title", filename)
-                    progress.progress(
-                        i / total,
-                        text=f"[{i+1}/{total}] '{title[:30]}...' SNS 생성 중",
-                    )
-                    try:
-                        sns_result = generate_sns_content(
-                            property_data=bp["data"],
-                            blog_post=bp["post"],
-                            model=model,
-                        )
-                        sns_key = f"{filename}_{idx}"
-                        sns_contents[sns_key] = sns_result
-                    except Exception as e:
-                        gen_errors.append({
-                            "title": title,
-                            "error": format_error_korean(e, filename),
-                        })
-
-                progress.progress(1.0, text="✅ 완료")
-                st.session_state["sns_contents"] = sns_contents
-
-                if gen_errors:
-                    st.warning(f"⚠️ {len(gen_errors)}개 매물 SNS 생성 실패")
-                    for ge in gen_errors:
-                        st.markdown(f"- **{ge['title']}**: {ge['error']}")
-
-                st.success(f"✅ {total - len(gen_errors)}개 매물 SNS 콘텐츠 생성 완료!")
-                st.rerun()
-
-        st.divider()
-        st.markdown("### 📋 매물별 SNS 콘텐츠")
-        st.caption("각 매물마다 개별 생성도 가능합니다. 생성된 결과는 라디오로 채널 전환.")
-
-        # 매물 목록 표시
-        for idx, bp in enumerate(_sns_blog_posts):
-            post = bp["post"]
-            filename = bp["filename"]
-            title = post.get("title", filename)
-            sns_key = f"{filename}_{idx}"
-            has_sns = sns_key in sns_contents
-
-            # 각 매물은 expander (중첩 expander - 작업 이력 보관함과 같은 패턴)
-            label_icon = "✅" if has_sns else "⏳"
-            label_status = "생성됨" if has_sns else "미생성"
-            with st.expander(
-                f"{label_icon} **{idx+1}. {title}**  ({label_status})",
-                expanded=False,
-            ):
-                col_a, col_b = st.columns([3, 1])
-                with col_a:
-                    st.caption(f"📁 {filename}")
-                with col_b:
-                    if not has_sns:
-                        if st.button(
-                            "🎬 SNS 생성 (240원)",
-                            key=f"sns_gen_one_{sns_key}",
-                            type="primary",
-                            use_container_width=True,
-                        ):
-                            try:
-                                with st.spinner("SNS 콘텐츠 생성 중..."):
-                                    sns_result = generate_sns_content(
-                                        property_data=bp["data"],
-                                        blog_post=post,
-                                        model=model,
-                                    )
-                                    sns_contents[sns_key] = sns_result
-                                    st.session_state["sns_contents"] = sns_contents
-                                st.success("✅ 생성 완료!")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"❌ 생성 실패: {format_error_korean(e, filename)}")
-
-                # 생성된 결과 표시 — 라디오 버튼으로 채널 전환 (st.tabs 회피)
-                if has_sns:
-                    sns_data = sns_contents[sns_key]
-                    formatted = format_sns_for_display(sns_data)
-
-                    # ⭐ 라디오 버튼으로 채널 선택 (중첩 st.tabs 회피 = 빈 화면 버그 없음)
-                    channel = st.radio(
-                        "콘텐츠 채널 선택:",
-                        options=["📸 인스타그램", "💬 카카오톡", "🎬 유튜브 쇼츠"],
-                        key=f"sns_channel_{sns_key}",
-                        horizontal=True,
-                        label_visibility="collapsed",
-                    )
-
-                    # ─── 인스타그램 ───
-                    if channel == "📸 인스타그램":
-                        st.markdown("**📸 인스타그램 피드 캡션**")
-                        st.code(
-                            sns_data.get("instagram_caption", ""),
-                            language=None,
-                            wrap_lines=True,
-                        )
-
-                        st.markdown("**#️⃣ 해시태그**")
-                        tags = sns_data.get("instagram_hashtags", [])
-                        st.code(" ".join(tags), language=None, wrap_lines=True)
-
-                        st.markdown("**📋 전체 (캡션 + 해시태그) — 한 번에 복사**")
-                        st.code(
-                            formatted["instagram_full"],
-                            language=None,
-                            wrap_lines=True,
-                        )
-
-                        st.download_button(
-                            "💾 인스타용 텍스트 다운로드",
-                            formatted["instagram_full"],
-                            file_name=f"instagram_{Path(filename).stem}.txt",
-                            mime="text/plain",
-                            key=f"sns_dl_insta_{sns_key}",
-                        )
-
-                    # ─── 카카오톡 ───
-                    elif channel == "💬 카카오톡":
-                        st.markdown("**💬 카카오톡 오픈채팅용 메시지**")
-                        st.caption(
-                            "💡 운영 중인 오픈채팅방에 그대로 복사·전송 가능. "
-                            "짧고 정보 위주의 톤으로 작성됨."
-                        )
-                        st.code(
-                            formatted["kakao"],
-                            language=None,
-                            wrap_lines=True,
-                        )
-
-                        st.download_button(
-                            "💾 카톡용 텍스트 다운로드",
-                            formatted["kakao"],
-                            file_name=f"kakao_{Path(filename).stem}.txt",
-                            mime="text/plain",
-                            key=f"sns_dl_kakao_{sns_key}",
-                        )
-
-                    # ─── 유튜브 쇼츠 ───
-                    elif channel == "🎬 유튜브 쇼츠":
-                        st.markdown("**🎬 유튜브 쇼츠 60초 스크립트**")
-                        st.caption(
-                            "💡 영상 편집 시 자막·나레이션·시간 배분 그대로 활용 가능."
-                        )
-
-                        st.code(
-                            formatted["youtube_full"],
-                            language=None,
-                            wrap_lines=True,
-                        )
-
-                        st.markdown("**📝 자막만 (영상 편집용)**")
-                        st.caption(
-                            "CapCut 등 영상 편집 앱에서 자막으로 그대로 사용 가능."
-                        )
-                        st.code(
-                            formatted["youtube_subtitles_only"],
-                            language=None,
-                            wrap_lines=True,
-                        )
-
-                        col_dl1, col_dl2 = st.columns(2)
-                        with col_dl1:
-                            st.download_button(
-                                "💾 전체 스크립트",
-                                formatted["youtube_full"],
-                                file_name=f"shorts_full_{Path(filename).stem}.txt",
-                                mime="text/plain",
-                                key=f"sns_dl_yt_full_{sns_key}",
-                                use_container_width=True,
-                            )
-                        with col_dl2:
-                            st.download_button(
-                                "💾 자막만",
-                                formatted["youtube_subtitles_only"],
-                                file_name=f"shorts_subtitles_{Path(filename).stem}.txt",
-                                mime="text/plain",
-                                key=f"sns_dl_yt_sub_{sns_key}",
-                                use_container_width=True,
-                            )
-
-        st.caption(
-            "⚠️ **주의**: SNS 콘텐츠는 페이지 새로고침 시 사라집니다. "
-            "필요한 내용은 즉시 다운로드하거나 복사하세요."
-        )
-
 
 tab1, tab2, tab3, tab4 = st.tabs(
     [
         "1️⃣ 도면 업로드",
         "2️⃣ 추출 결과·스타일 선택",
         "3️⃣ 블로그 미리보기",
-        "4️⃣ 네이버 카페 발행",
+        "4️⃣ 📚 작업 이력 보관함",
     ]
 )
 
@@ -1950,7 +1428,7 @@ with tab2:
 
                 st.success(
                     f"✅ 블로그 {len(blog_posts)}개 생성 완료! "
-                    f"3번 탭에서 확인하시거나, 화면 상단 **'📚 작업 이력 보관함'** expander에서 "
+                    f"3번 탭에서 확인하시거나, **4️⃣ 작업 이력 보관함 탭**에서 "
                     f"나중에라도 다시 조회할 수 있습니다."
                 )
                 st.balloons()
@@ -1970,7 +1448,7 @@ with tab3:
     if not blog_posts:
         st.info(
             "👈 2번 탭에서 블로그 글을 생성하세요.\n\n"
-            "💡 과거에 생성한 블로그 글은 화면 상단의 **'📚 작업 이력 보관함'** expander에서 다시 조회·다운로드 가능합니다."
+            "💡 과거에 생성한 블로그 글은 **4️⃣ 작업 이력 보관함 탭**에서 다시 조회·다운로드 가능합니다."
         )
     else:
         st.subheader(f"📝 생성된 블로그 — 총 {len(blog_posts)}개")
@@ -2091,7 +1569,7 @@ with tab3:
                 st.markdown("**해시태그**")
                 st.code(" ".join(post.get("hashtags", [])), language=None)
 
-                # ⭐ 네이버 발행 보조 — 본문 HTML 자동 복사 + 글쓰기 페이지 열기
+                # ⭐ 네이버 발행 보조 — 본문 HTML 클립보드 복사
                 st.markdown("---")
                 st.markdown("**✍️ 네이버 블로그 발행 보조**")
 
@@ -2113,7 +1591,7 @@ with tab3:
                             width:100%;
                             box-shadow:0 2px 4px rgba(0,0,0,0.1);
                         ">
-                        📋 본문 HTML 복사 + 네이버 블로그 글쓰기 열기
+                        📋 본문 HTML 복사
                     </button>
                     <p id="status-{idx}" style="
                         margin-top:8px;
@@ -2127,9 +1605,8 @@ with tab3:
                             const html = {html_json};
                             const status = document.getElementById('status-{idx}');
                             navigator.clipboard.writeText(html).then(() => {{
-                                status.innerHTML = '✅ HTML 클립보드에 복사 완료! 네이버 글쓰기 페이지가 새 탭에 열립니다.';
+                                status.innerHTML = '✅ 본문 HTML이 클립보드에 복사되었습니다! 네이버 블로그 글쓰기 화면에 붙여넣으세요.';
                                 status.style.color = '#03c75a';
-                                window.open('https://blog.naver.com/PostWriteForm.naver', '_blank');
                             }}).catch(err => {{
                                 status.innerHTML = '❌ 복사 실패: ' + err.message + ' (아래 HTML 다운로드 사용)';
                                 status.style.color = '#d32f2f';
@@ -2141,9 +1618,9 @@ with tab3:
                 )
 
                 st.caption(
-                    "💡 사용법: 위 초록색 버튼 클릭 → 네이버 글쓰기 페이지가 새 탭에 열림 → "
-                    "글쓰기 화면 우측 위 **'기본 도구'** 옆 ⋮ → **'HTML 편집'** 클릭 → "
-                    "편집창에 **Ctrl+V** 로 붙여넣기 → 발행"
+                    "💡 사용법: 위 초록색 버튼으로 **본문 HTML 복사** → 네이버 블로그 "
+                    "글쓰기 페이지 직접 접속 → 우측 위 **'기본 도구'** 옆 ⋮ → "
+                    "**'HTML 편집'** 클릭 → 편집창에 **Ctrl+V** 로 붙여넣기 → 발행"
                 )
 
                 c1, c2 = st.columns(2)
@@ -2164,207 +1641,283 @@ with tab3:
                         key=f"dl_json_{idx}",
                     )
 
-# ───── Tab 4: 네이버 카페 자동 발행 ─────
+# ───── Tab 4: 작업 이력 보관함 (구 카페발행 탭 위치) ─────
 with tab4:
-    st.subheader("📤 네이버 카페 자동 발행")
-    blog_posts = st.session_state.get("blog_posts")
-    if not blog_posts:
-        st.info("먼저 1·2·3번 탭에서 블로그 글을 생성하세요.")
-        st.stop()
-
-    # ─── 환경 변수 확인 ───
-    naver_client_id = os.getenv("NAVER_CLIENT_ID", "").strip()
-    naver_client_secret = os.getenv("NAVER_CLIENT_SECRET", "").strip()
-    naver_club_id = os.getenv("NAVER_CAFE_CLUB_ID", "").strip()
-    naver_menu_id = os.getenv("NAVER_CAFE_DEFAULT_MENU_ID", "").strip()
-    naver_redirect = os.getenv(
-        "NAVER_REDIRECT_URI", "https://jreblog.streamlit.app"
-    ).strip()
-
-    if not (naver_client_id and naver_client_secret and naver_club_id):
-        st.error("⚠️ 네이버 카페 API 환경변수가 설정되지 않았습니다.")
-        st.info(
-            "💡 **설정 방법**: Streamlit Cloud → Settings → Secrets 에 다음을 추가:\n\n"
-            "```\n"
-            'NAVER_CLIENT_ID = "발급받은_Client_ID"\n'
-            'NAVER_CLIENT_SECRET = "발급받은_Client_Secret"\n'
-            'NAVER_CAFE_CLUB_ID = "카페_club_id"\n'
-            'NAVER_CAFE_DEFAULT_MENU_ID = "기본_게시판_menu_id"\n'
-            'NAVER_REDIRECT_URI = "https://jreblog.streamlit.app"\n'
-            "```\n\n"
-            "💡 우선은 3번 탭의 '📋 본문 HTML 복사' 버튼으로 수동 발행 가능합니다."
-        )
-        st.stop()
-
-    # ─── 카페 클라이언트 준비 ───
+    st.subheader("📚 작업 이력 보관함 — 회사 전체 공유")
     try:
-        client = NaverCafeClient(
-            client_id=naver_client_id,
-            client_secret=naver_client_secret,
-            redirect_uri=naver_redirect,
-            club_id=naver_club_id,
-            default_menu_id=naver_menu_id,
-            access_token=st.session_state.get("naver_access_token"),
-            refresh_token=st.session_state.get("naver_refresh_token"),
-        )
-    except Exception as e:
-        st.error(format_publish_error_korean(e))
-        st.stop()
+        _hist_preview = load_history()
+        # 작업 이력은 모든 사용자가 공유 (관리자/사용자 구분 없음)
+        _hist_count = len(_hist_preview)
+    except Exception:
+        _hist_preview = []
+        _hist_count = 0
 
-    # ─── OAuth 인증 흐름: URL의 ?code= 자동 처리 ───
-    auth_code_in_url = st.query_params.get("code", "")
-    if auth_code_in_url and not st.session_state.get("naver_access_token"):
-        with st.spinner("🔐 네이버 인증 처리 중..."):
-            try:
-                client.exchange_code_for_token(auth_code_in_url)
-                st.session_state["naver_access_token"] = client.access_token
-                st.session_state["naver_refresh_token"] = client.refresh_token
-                # ?code= 제거 (auth 토큰은 유지)
-                params = dict(st.query_params)
-                params.pop("code", None)
-                params.pop("state", None)
-                st.query_params.clear()
-                for k, v in params.items():
-                    st.query_params[k] = v
-                st.success("✅ 네이버 인증 완료! 이제 카페에 발행할 수 있습니다.")
-                st.rerun()
-            except Exception as e:
-                st.error(f"❌ 인증 실패: {format_publish_error_korean(e)}")
-
-    # ─── 인증 안 됐으면: 인증 안내 ───
-    if not st.session_state.get("naver_access_token"):
-        st.markdown(
-            "### 🔐 최초 1회 네이버 카페 인증 필요\n\n"
-            "**카페 매니저 또는 부매니저 계정**으로 인증하면 이후 자동 갱신되어 "
-            "영구 자동 발행이 가능합니다."
-        )
-
-        auth_url = client.get_auth_url()
-
-        st.link_button(
-            "🔐 네이버 카페 인증하기 (새 탭에서 열기)",
-            auth_url,
-            use_container_width=True,
-        )
-
-        st.caption(
-            "1. 위 버튼 클릭 → 네이버 로그인 페이지가 새 탭에서 열림\n"
-            "2. **글쓰기 권한이 있는 계정**으로 로그인:\n"
-            "   - ✅ 카페 매니저 계정\n"
-            "   - ✅ 카페 부매니저 계정\n"
-            "   - ✅ 해당 게시판에 글쓰기 권한이 있는 일반 회원 계정\n"
-            "3. '동의하기' 클릭\n"
-            "4. 이 페이지로 자동 복귀 → 인증 완료\n\n"
-            "💡 이 인증은 한 번만 하면 됩니다."
-        )
-        st.stop()
-
-    # ─── 인증 완료 후 발행 UI ───
-    st.success("✅ 네이버 인증 완료. 카페 발행 가능 상태입니다.")
-
-    with st.expander("ℹ️ 발행 설정 확인", expanded=False):
-        st.write(f"**카페 ID**: `{naver_club_id}`")
-        st.write(f"**기본 게시판 ID**: `{naver_menu_id}`")
-        try:
-            profile = client.get_profile()
-            st.write(f"**인증된 계정**: {profile.get('name', '?')} ({profile.get('email', '?')})")
-        except Exception:
-            pass
-
-        if st.button("🔓 인증 해제 (재인증)"):
-            st.session_state.pop("naver_access_token", None)
-            st.session_state.pop("naver_refresh_token", None)
-            st.rerun()
-
-    st.markdown("---")
-    st.markdown("### 📝 발행할 글 선택")
-
-    # 발행 옵션
-    col_opt1, col_opt2 = st.columns(2)
-    with col_opt1:
-        target_menu_id = st.text_input(
-            "게시판 ID",
-            value=naver_menu_id,
-            help="다른 게시판에 올리려면 변경. 기본값 = Streamlit Secrets의 NAVER_CAFE_DEFAULT_MENU_ID",
-        )
-    with col_opt2:
-        is_open_all = st.checkbox(
-            "전체 공개로 발행",
-            value=True,
-            help="해제하면 카페 멤버만 볼 수 있음",
-        )
-
-    # 발행 대상 선택 (체크박스)
-    st.markdown("**아래에서 발행할 글을 선택하세요:**")
-    selected_indices = []
-    for idx, bp in enumerate(blog_posts):
-        post = bp["post"]
-        title = post.get("title", bp["filename"])
-        if st.checkbox(f"{idx+1}. {title}", key=f"publish_select_{idx}"):
-            selected_indices.append(idx)
-
-    # 일괄 발행 버튼
-    st.markdown("---")
-    if st.button(
-        f"🚀 선택한 {len(selected_indices)}개 글 카페에 일괄 발행",
-        type="primary",
-        disabled=(len(selected_indices) == 0),
-        use_container_width=True,
-    ):
-        if not target_menu_id:
-            st.error("게시판 ID를 입력하세요.")
+    # 파일 크기 계산 (모든 사용자에게 표시)
+    try:
+        from src.persistence import HISTORY_FILE
+        if HISTORY_FILE.exists():
+            _hist_bytes = HISTORY_FILE.stat().st_size
+            if _hist_bytes < 1024:
+                _hist_size = f"{_hist_bytes}B"
+            elif _hist_bytes < 1024 * 1024:
+                _hist_size = f"{_hist_bytes/1024:.1f}KB"
+            else:
+                _hist_size = f"{_hist_bytes/(1024*1024):.2f}MB"
         else:
-            progress = st.progress(0.0, text="발행 시작...")
-            results = []
-            errors = []
+            _hist_size = "0B"
+    except Exception:
+        _hist_size = ""
 
-            # 최신 토큰 동기화
-            client.access_token = st.session_state.get("naver_access_token")
-            client.refresh_token = st.session_state.get("naver_refresh_token")
+    # 최근 작업 / 가장 오래된 계산 (제목에 표시)
+    _hist_latest = ""
+    _hist_oldest = ""
+    try:
+        if _hist_preview:
+            _latest_ts = datetime.fromisoformat(_hist_preview[0]["timestamp"])
+            _hist_latest = _latest_ts.strftime("%m/%d %H:%M")
+            _oldest_ts = datetime.fromisoformat(_hist_preview[-1]["timestamp"])
+            _days_old = (datetime.now() - _oldest_ts).days
+            _hist_oldest = f"{_days_old}일전" if _days_old > 0 else "오늘"
+    except Exception:
+        pass
 
-            total = len(selected_indices)
-            for i, idx in enumerate(selected_indices):
-                bp = blog_posts[idx]
-                post = bp["post"]
-                title = post.get("title", bp["filename"])
-                progress.progress(
-                    i / total, text=f"[{i+1}/{total}] '{title[:30]}...' 발행 중"
-                )
+    # Expander 제목 — 4가지 정보 모두 표시 (건수·용량·최근·오래된)
+    _label_prefix = "📚 작업 이력 보관함"
+    if _hist_count == 0:
+        _expander_label = f"{_label_prefix} (비어 있음 · 클릭하여 펼치기)"
+    else:
+        _parts = [f"{_hist_count}건"]
+        if _hist_size:
+            _parts.append(_hist_size)
+        if _hist_latest:
+            _parts.append(f"🆕{_hist_latest}")
+        if _hist_oldest:
+            _parts.append(f"🗓{_hist_oldest}")
+        _expander_label = f"{_label_prefix} ({' · '.join(_parts)} · 클릭하여 펼치기)"
+
+    # 통계 요약 표시 (건수·용량·최근·오래된)
+    if _hist_count > 0 and _parts:
+        st.caption(" · ".join(_parts))
+    st.caption(
+        "💡 회사 전체 매물 이력이 자동 저장됩니다. "
+        "**영구 보존** · 모든 사용자가 공유 · 수동 삭제 전까지 안 사라집니다."
+    )
+
+    # 이력 로드 (실패해도 빈 리스트 반환) — 모든 사용자가 전체 이력 조회
+    try:
+        history_all = load_history()
+        # 기존 이력 (user_email 없음) → admin@win-bro.com 작성으로 처리
+        for h in history_all:
+            if not h.get("user_email"):
+                h["user_email"] = ADMIN_EMAIL
+        # 작업 이력은 회사 공유: 모든 사용자가 전체 이력 조회
+        history = history_all
+    except Exception as e:
+        st.error(f"⚠️ 이력 로드 중 에러: {e}")
+        history = []
+        history_all = []
+
+    if not history:
+        st.info(
+            "아직 저장된 이력이 없습니다.\n\n"
+            "1·2번 탭에서 블로그를 생성하면 자동으로 여기에 저장됩니다."
+        )
+    else:
+        # 통계는 expander 제목에 표시됨 (건수·용량·최근·오래된)
+        # 상세 통계는 사이드바 "📊 회사 전체 통계"에서 확인
+        # N개월 정리·Excel 리포트는 사이드바로 이동됨
+
+        # 검색
+        search_q = st.text_input(
+            "🔍 검색 (매물번호·제목·파일명)",
+            key="hist_search_v2",
+            placeholder="예: 1234567, 신주쿠, 1K",
+        )
+
+        # ⭐ 즐겨찾기 필터
+        only_favorites = st.checkbox(
+            "⭐ 즐겨찾기만 보기",
+            key="hist_only_favorites_v2",
+            value=False,
+        )
+
+        # 필터링 (매물번호·제목·파일명)
+        filtered = history
+        if search_q:
+            q = search_q.lower()
+            filtered = [
+                h for h in filtered
+                if q in h.get("title", "").lower()
+                or q in h.get("filename", "").lower()
+                or q in h.get("property_number", "").lower()
+            ]
+        if only_favorites:
+            filtered = [h for h in filtered if h.get("favorite")]
+
+        if not filtered:
+            st.warning(f"'{search_q}' 검색 결과 없음")
+        else:
+            st.markdown(f"**검색 결과: {len(filtered)}건**")
+
+            # 선택 삭제 모드
+            col_btn1, col_btn2 = st.columns([1, 5])
+            with col_btn1:
+                if st.button("☑️ 모두 선택", use_container_width=True):
+                    for h in filtered:
+                        st.session_state[f"hist_sel_{h['id']}"] = True
+                    st.rerun()
+            with col_btn2:
+                if st.button("⬜ 모두 해제", use_container_width=True):
+                    for h in filtered:
+                        st.session_state[f"hist_sel_{h['id']}"] = False
+                    st.rerun()
+
+            st.divider()
+
+            # 이력 목록 표시
+            selected_ids = []
+            for idx, h in enumerate(filtered):
+                hid = h.get("id", "")
+                title = h.get("title", "(제목 없음)")
+                filename = h.get("filename", "")
+                prop_num = h.get("property_number", "")
+                timestamp = h.get("timestamp", "")
+                is_fav = h.get("favorite", False)
+
+                # 제목에 이미 [매물번호]가 포함됐는지 확인 (중복 방지)
+                title_has_num = prop_num and title.startswith(f"[{prop_num}]")
+
+                # 표시용 시간 포맷
                 try:
-                    result = client.write_article(
-                        subject=title,
-                        content_html=post.get("html_content", ""),
-                        menu_id=target_menu_id,
-                        is_open=is_open_all,
+                    ts_obj = datetime.fromisoformat(timestamp)
+                    ts_display = ts_obj.strftime("%Y-%m-%d %H:%M")
+                    # ⭐ 영구 보존이라 자동 삭제 경고 없음
+                    retention_warn = ""
+                except Exception:
+                    ts_display = timestamp
+                    retention_warn = ""
+
+                # 체크박스 + 즐겨찾기 + 제목
+                col_chk, col_fav, col_info = st.columns([0.5, 0.5, 9])
+                with col_chk:
+                    checked = st.checkbox(
+                        " ",
+                        key=f"hist_sel_{hid}",
+                        label_visibility="collapsed",
                     )
-                    # 토큰이 갱신됐을 수 있으니 session_state에 다시 저장
-                    st.session_state["naver_access_token"] = client.access_token
-                    results.append({
-                        "idx": idx,
-                        "title": title,
-                        "article_id": result["article_id"],
-                        "article_url": result["article_url"],
-                    })
-                except Exception as e:
-                    errors.append({
-                        "idx": idx,
-                        "title": title,
-                        "error": format_publish_error_korean(e),
-                    })
+                    if checked:
+                        selected_ids.append(hid)
 
-            progress.progress(1.0, text="✅ 발행 완료")
+                with col_fav:
+                    fav_icon = "⭐" if is_fav else "☆"
+                    if st.button(
+                        fav_icon,
+                        key=f"hist_fav_{hid}",
+                        help="즐겨찾기 토글",
+                        use_container_width=True,
+                    ):
+                        toggle_favorite(hid)
+                        st.rerun()
 
-            # 결과 표시
-            if results:
-                st.success(f"✅ {len(results)}개 글 발행 성공!")
-                for r in results:
+                with col_info:
+                    fav_badge = " ⭐" if is_fav else ""
+                    # 순번 다음에 매물번호 표시 (제목에 이미 있으면 제목만)
+                    if prop_num and not title_has_num:
+                        display_title = f"**{idx+1}. [{prop_num}] {title}**{fav_badge}"
+                    else:
+                        display_title = f"**{idx+1}. {title}**{fav_badge}"
                     st.markdown(
-                        f"- **{r['idx']+1}. {r['title']}**  →  "
-                        f"[카페에서 보기 (글 #{r['article_id']})]({r['article_url']})"
+                        f"{display_title}  \n"
+                        f"<span style='color:#888;font-size:13px'>"
+                        f"📁 {filename} · 🕒 {ts_display}{retention_warn}</span>",
+                        unsafe_allow_html=True,
                     )
 
-            if errors:
-                st.error(f"⚠️ {len(errors)}개 글 발행 실패")
-                for e in errors:
-                    st.markdown(f"**{e['idx']+1}. {e['title']}**")
-                    st.markdown(e["error"])
+                # 카톡 요약 표시 (접힘 상태가 기본)
+                summary = h.get("summary_for_chat", "")
+                if summary:
+                    with st.expander("📱 카카오톡용 요약 보기", expanded=False):
+                        st.code(summary, language=None, wrap_lines=True)
+
+                # 추가 작업: 본문 + 다운로드 (펼침)
+                with st.expander("📄 본문 HTML + 해시태그 + 다운로드", expanded=False):
+                    html = h.get("html_content", "")
+                    if html:
+                        st.markdown(html, unsafe_allow_html=True)
+                    tags = h.get("hashtags", [])
+                    if tags:
+                        st.markdown("**해시태그**")
+                        st.code(" ".join(tags), language=None)
+
+                    # 다운로드 버튼들
+                    dl_col1, dl_col2 = st.columns(2)
+                    with dl_col1:
+                        st.download_button(
+                            "💾 HTML 다운로드",
+                            build_naver_smarteditor_html({
+                                "title": title,
+                                "html_content": html,
+                                "hashtags": tags,
+                            }),
+                            file_name=f"history_{hid}_{Path(filename).stem}.html",
+                            mime="text/html",
+                            key=f"hist_dl_html_{hid}",
+                            use_container_width=True,
+                        )
+                    with dl_col2:
+                        st.download_button(
+                            "📋 JSON 다운로드",
+                            json.dumps(h, ensure_ascii=False, indent=2),
+                            file_name=f"history_{hid}.json",
+                            mime="application/json",
+                            key=f"hist_dl_json_{hid}",
+                            use_container_width=True,
+                        )
+
+                st.divider()
+
+            # 선택 삭제 + 전체 삭제 버튼
+            st.markdown("---")
+            col_d1, col_d2, col_d3 = st.columns([2, 2, 6])
+            with col_d1:
+                if st.button(
+                    f"🗑️ 선택 항목 삭제 ({len(selected_ids)}개)",
+                    type="primary",
+                    disabled=(len(selected_ids) == 0),
+                    use_container_width=True,
+                ):
+                    delete_from_history(selected_ids)
+                    # 선택 상태 초기화
+                    for sid in selected_ids:
+                        st.session_state.pop(f"hist_sel_{sid}", None)
+                    st.success(f"✅ {len(selected_ids)}개 항목 삭제 완료")
+                    st.rerun()
+
+            with col_d2:
+                if st.button(
+                    "🗑️ 전체 삭제",
+                    type="secondary",
+                    use_container_width=True,
+                ):
+                    if st.session_state.get("_confirm_clear_all"):
+                        clear_history()
+                        st.session_state.pop("_confirm_clear_all", None)
+                        st.success("✅ 모든 이력 삭제 완료")
+                        st.rerun()
+                    else:
+                        st.session_state["_confirm_clear_all"] = True
+                        st.warning("⚠️ 한 번 더 클릭하면 모든 이력이 삭제됩니다.")
+
+            with col_d3:
+                # 전체 백업 다운로드
+                if filtered:
+                    st.download_button(
+                        f"📥 전체 백업 다운로드 ({len(history)}건 JSON)",
+                        json.dumps(history, ensure_ascii=False, indent=2),
+                        file_name=f"jre_history_backup_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+                        mime="application/json",
+                        use_container_width=True,
+                    )
+
+
+
