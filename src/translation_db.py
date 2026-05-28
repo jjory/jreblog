@@ -349,6 +349,8 @@ def translate_line(line: str) -> str:
     """노선명 일본어→한국어. 매핑 없으면 원본 반환.
     '埼玉高速鉄道線' → '사이타마 고속철도선'
     'JR山手線' → 'JR 야마노테선' (JR 접두어 보존)
+    '都営三田線' → '도에이 미타 라인' (운영사 접두어 한글 변환)
+    '東京メトロ丸ノ内線' → '도쿄메트로 마루노우치 라인'
     """
     if not line:
         return ""
@@ -356,15 +358,38 @@ def translate_line(line: str) -> str:
     # 정확히 일치
     if line in LINE_MAP:
         return LINE_MAP[line]
+
+    # 운영사 접두어 처리 (都営/東京メトロ/メトロ/東京都交通局 등)
+    # 접두어를 한글로 변환하고, 나머지 노선명을 사전에서 찾음
+    operator_prefixes = [
+        ("東京メトロ", "도쿄메트로 "),
+        ("東京都交通局", "도에이 "),
+        ("都営地下鉄", "도에이 "),
+        ("都営", "도에이 "),
+        ("メトロ", "메트로 "),
+    ]
+    for jp_prefix, ko_prefix in operator_prefixes:
+        if line.startswith(jp_prefix):
+            body = line[len(jp_prefix):].strip()
+            if body in LINE_MAP:
+                return ko_prefix + LINE_MAP[body]
+            # 본문도 부분 매칭 시도
+            for jp, ko in sorted(LINE_MAP.items(), key=lambda x: -len(x[0])):
+                if jp in body:
+                    return ko_prefix + body.replace(jp, ko)
+            # 본문 번역 실패 시에도 접두어만이라도 변환
+            return ko_prefix + body
+
     # JR 접두어 처리
-    jr_prefix = ""
-    body = line
     m = re.match(r"^(JR[\s・]*)(.+)$", line)
     if m:
-        jr_prefix = "JR "
         body = m.group(2).strip()
         if body in LINE_MAP:
-            return jr_prefix + LINE_MAP[body]
+            return "JR " + LINE_MAP[body]
+        for jp, ko in sorted(LINE_MAP.items(), key=lambda x: -len(x[0])):
+            if jp in body:
+                return "JR " + body.replace(jp, ko)
+
     # 부분 일치 (긴 키 우선)
     for jp, ko in sorted(LINE_MAP.items(), key=lambda x: -len(x[0])):
         if jp in line:
