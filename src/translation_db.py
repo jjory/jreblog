@@ -52,6 +52,12 @@ LINE_MAP = {
     "西武豊島線": "세이부 도시마선",
     "西武山口線": "세이부 야마구치선",
     "丸ノ内線": "마루노우치 라인",
+    # 丸ノ内線 호난마치(方南町) 지선 — 마이소크에 다양한 표기 변형 존재 (모두 같은 노선)
+    "丸ノ内線方南町支線": "마루노우치선 호난마치 지선",
+    "丸ノ内方南町支線": "마루노우치선 호난마치 지선",
+    "丸ノ内方南支線": "마루노우치선 호난마치 지선",
+    "方南町支線": "마루노우치선 호난마치 지선",
+    "方南支線": "마루노우치선 호난마치 지선",
     "有楽町線": "유라쿠초선",
     "日比谷線": "히비야 라인",
     "千代田線": "치요다선",
@@ -359,13 +365,27 @@ def translate_line(line: str) -> str:
     if line in LINE_MAP:
         return LINE_MAP[line]
 
-    # 운영사 접두어 처리 (都営/東京メトロ/メトロ/東京都交通局 등)
-    # 접두어를 한글로 변환하고, 나머지 노선명을 사전에서 찾음
+    # 운영사 접두어 처리 — 接頭辞를 한글로 변환하거나 떼고, 나머지 노선명을 사전에서 찾음
+    # ⚠️ 긴 접두어를 먼저 두어야 함 (예: 京王電鉄 > 京王 — 京王 단독은 노선명 일부라 안 넣음)
     operator_prefixes = [
+        # 도쿄 지하철 — 운영사명을 한글로 명시 (도에이/도쿄메트로)
         ("東京メトロ", "도쿄메트로 "),
         ("東京都交通局", "도에이 "),
         ("都営地下鉄", "도에이 "),
         ("都営", "도에이 "),
+        # 사철(私鉄) — 한국어 블로그에서는 운영사명 생략하고 노선명만 사용 (관례)
+        # (긴 이름 먼저 — 京浜急行電鉄 > 京急電鉄 등)
+        ("京浜急行電鉄", ""),
+        ("京浜急行", ""),
+        ("京王電鉄", ""),
+        ("京急電鉄", ""),
+        ("小田急電鉄", ""),
+        ("東急電鉄", ""),
+        ("京成電鉄", ""),
+        ("東武鉄道", ""),
+        ("西武鉄道", ""),
+        ("相模鉄道", ""),
+        # 그 외 — 짧은 형태 (위 사철 회사명 처리 후 남는 케이스)
         ("メトロ", "메트로 "),
     ]
     for jp_prefix, ko_prefix in operator_prefixes:
@@ -506,28 +526,37 @@ def detect_untranslated(property_data: dict) -> list:
     """매물 데이터에서 DB에 없는(번역 안 되는) 노선/역/지명을 찾아 리스트로 반환.
     회사 DB에 추가 등록이 필요한 항목 알림용.
 
-    반환: [{"category": "역명", "original": "○○", "note": "DB 미등록"}]
+    ⭐ Layer 2 강화: is_in_db()의 관대한 부분매칭에 의존하지 않고,
+       translate_X() 결과에 일본어가 남아 있으면 무조건 미등록으로 처리.
+       → 例: '京王電鉄京王線' → 부분 번역으로 '京王電鉄게이오선'이 나와도
+         결과에 한자가 남았으므로 미등록 경고 발생.
+
+    반환: [{"category": "노선", "original": "...", "translated": "...", "note": "..."}]
     """
     missing = []
     station = property_data.get("nearest_station") or {}
 
+    # 노선명 — is_in_db 체크 빼고, 변환 결과의 한자/가나 잔여만 판정
     line_raw = (station.get("line") or "").strip()
-    if line_raw and not is_in_db(line_raw, "line"):
+    if line_raw:
         translated = translate_line(line_raw)
-        if has_japanese(translated):  # 번역 후에도 일본어 남으면 미등록
+        if has_japanese(translated):
             missing.append({
                 "category": "노선",
                 "original": line_raw,
+                "translated": translated,  # 부분 변환 결과도 같이 보여줘서 어디가 한자인지 보임
                 "note": "DB 미등록 — 路線 시트에 추가 필요",
             })
 
+    # 역명 — 동일 방식
     station_raw = (station.get("station") or "").strip()
-    if station_raw and not is_in_db(station_raw, "station"):
+    if station_raw:
         translated = translate_station(station_raw)
         if has_japanese(translated):
             missing.append({
                 "category": "역명",
                 "original": station_raw,
+                "translated": translated,
                 "note": "DB 미등록 — 駅名 시트에 추가 필요",
             })
 
