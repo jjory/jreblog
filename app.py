@@ -1248,6 +1248,441 @@ def _run_blog_generation(
 
 
 # ─────────────────────────────────────────────────
+# Drive 자동 처리 (Phase 3)
+# ─────────────────────────────────────────────────
+
+def _drive_configured() -> bool:
+    """Drive 환경변수 두 개가 모두 설정돼 있는지 빠른 체크."""
+    return bool(
+        os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+        and os.getenv("DRIVE_ROOT_FOLDER_ID", "").strip()
+    )
+
+
+def _ensure_today_folder_cached():
+    """오늘 폴더 ID/이름을 session_state에 10분 캐시."""
+    last_check = st.session_state.get("_today_folder_check_ts")
+    cached = st.session_state.get("_today_folder")
+    if cached and last_check and (datetime.now() - last_check).total_seconds() < 600:
+        return cached
+    from src.drive_sync import get_or_create_today_folder
+    folder_id, folder_name = get_or_create_today_folder()
+    st.session_state["_today_folder"] = (folder_id, folder_name)
+    st.session_state["_today_folder_check_ts"] = datetime.now()
+    return (folder_id, folder_name)
+
+
+def _refresh_drive_pending(folder_id, force=False):
+    """미처리 파일 목록을 session_state에 10분 캐시. force=True면 즉시 갱신."""
+    last_check = st.session_state.get("_drive_files_check_ts")
+    cached = st.session_state.get("_drive_pending_files")
+    if (
+        not force
+        and cached is not None
+        and last_check
+        and (datetime.now() - last_check).total_seconds() < 600
+    ):
+        return cached
+    from src.drive_sync import list_pending_files
+    pending = list_pending_files(folder_id)
+    st.session_state["_drive_pending_files"] = pending
+    st.session_state["_drive_files_check_ts"] = datetime.now()
+    return pending
+
+
+def _process_drive_files(file_list, current_email, target_visa_arg, model_arg, engine_arg):
+    """Drive 자동 처리 파이프라인 — 다운로드 → 분석 → 생성 → 이력 저장 → 이동."""
+    from src.drive_sync import (
+        download_file_bytes,
+        move_file_to_folder,
+        get_or_create_processed_subfolder,
+        append_auto_log,
+    )
+
+    # 1. 매물번호(7자리) 필터링 — 없는 파일은 자동 처리에서 스킵
+    valid = []
+    skipped = []
+    for f in file_list:
+        prop_num = _extract_property_number(f["name"])
+        if not prop_num:
+            skipped.append(f)
+        else:
+            valid.append({"file": f, "property_number": prop_num})
+
+    if skipped:
+        skipped_names = ", ".join(f["name"] for f in skipped)
+        st.warning(
+            f"⚠️ 매물번호(7자리) 없어서 자동 처리에서 제외 — **{len(skipped)}건**\n\n"
+            f"파일명: {skipped_names}\n\n"
+            f"→ Drive에서 파일명 앞에 7자리 매물번호 붙여주세요 "
+            f"(예: `1234567_도면.pdf`)"
+        )
+
+    if not valid:
+        st.info("ℹ️ 처리할 매물이 없습니다 (모든 파일이 매물번호 없음).")
+        # 스킵만이라도 로그 기록
+        if skipped:
+            entries = [
+                {
+                    "timestamp": datetime.now().isoformat(),
+                    "filename": f["name"],
+                    "drive_file_id": f["id"],
+                    "user_email": current_email,
+                    "status": "skipped",
+                    "error": "매물번호(7자리) 없음",
+                }
+                for f in skipped
+            ]
+            try:
+                append_auto_log(entries)
+            except Exception:
+                pass
+        return
+
+    # 2. 처리완료 하위 폴더 확보
+    try:
+        folder_id, folder_name = st.session_state["_today_folder"]
+        processed_folder_id = get_or_create_processed_subfolder(folder_id)
+    except Exception as e:
+        st.error(f"❌ '처리완료' 폴더 생성 실패: {e}")
+        return
+
+    # 3. 재처리 판정용 — 기존 이력의 파일명 set
+    try:
+        existing_history = load_history()
+    except Exception:
+        existing_history = []
+    existing_filenames = {h.get("filename", "") for h in existing_history}
+
+    st.markdown("---")
+    st.markdown(f"### 🚀 Drive 자동 처리 — **{len(valid)}건**")
+
+    # 4. 다운로드 + 분석 (병렬)
+    dl_progress = st.progress(0.0, text="다운로드·분석 중…")
+
+    def _dl_and_analyze(item):
+        f = item["file"]
+        bytes_data = download_file_bytes(f["id"])
+        suffix = "." + f["name"].rsplit(".", 1)[-1].lower()
+        return _analyze_worker(bytes_data, suffix, engine_arg, model_arg)
+
+    analyzed = []  # [{"file_info":..., "data":..., "error":...}]
+    with ThreadPoolExecutor(max_workers=MAX_PARALLEL_WORKERS) as executor:
+        future_to_idx = {
+            executor.submit(_dl_and_analyze, item): i
+            for i, item in enumerate(valid)
+        }
+        done = 0
+        total = len(future_to_idx)
+        for future in as_completed(future_to_idx):
+            i = future_to_idx[future]
+            item = valid[i]
+            try:
+                data = future.result()
+                analyzed.append({"file_info": item, "data": data, "error": None})
+            except Exception as e:
+                analyzed.append({"file_info": item, "data": None, "error": format_error_korean(e, item["file"]["name"])})
+            done += 1
+            dl_progress.progress(done / total, text=f"[{done}/{total}] 다운로드·분석")
+
+    # 5. 분석 성공한 매물만 블로그 생성 (병렬)
+    gen_progress = st.progress(0.0, text="블로그 생성 대기…")
+    valid_for_gen = [a for a in analyzed if a.get("data")]
+
+    successful = []  # 생성까지 성공한 매물 (이동 + 이력 저장 대상)
+    failed = [a for a in analyzed if a.get("error")]  # 분석 실패한 것 먼저 추가
+
+    if valid_for_gen:
+        gen_progress.progress(0.0, text="블로그 생성 중…")
+        with ThreadPoolExecutor(max_workers=MAX_PARALLEL_WORKERS) as executor:
+            future_to_idx = {
+                executor.submit(
+                    _generate_worker,
+                    a["data"],
+                    target_visa_arg,
+                    "친근형",  # 자동 모드 기본 스타일
+                    "",        # 별도 지시 없음
+                    model_arg,
+                ): i
+                for i, a in enumerate(valid_for_gen)
+            }
+            done = 0
+            total = len(future_to_idx)
+            for future in as_completed(future_to_idx):
+                i = future_to_idx[future]
+                a = valid_for_gen[i]
+                try:
+                    post = future.result()
+                    a["post"] = post
+                    successful.append(a)
+                except Exception as e:
+                    a["error"] = format_error_korean(e, a["file_info"]["file"]["name"])
+                    failed.append(a)
+                done += 1
+                gen_progress.progress(done / total, text=f"[{done}/{total}] 블로그 생성")
+
+    # 6. 성공한 매물: 이력 저장 + Drive 처리완료로 이동
+    history_items_to_add = []
+    log_entries = []
+    moved_count = 0
+    move_failed_names = []
+
+    for s in successful:
+        f = s["file_info"]["file"]
+        prop_num = s["file_info"]["property_number"]
+        post = s["post"]
+
+        # 매물번호를 본문 표에 삽입 (수동 모드와 동일)
+        if prop_num:
+            post["html_content"] = _insert_property_number_to_table(
+                post.get("html_content", ""), prop_num
+            )
+
+        # 재처리 판정 — 같은 파일명이 이미 이력에 있나?
+        is_reprocess = f["name"] in existing_filenames
+
+        history_items_to_add.append({
+            "filename": f["name"],
+            "property_number": prop_num,
+            "title": post.get("title", ""),
+            "summary_for_chat": post.get("summary_for_chat", ""),
+            "html_content": post.get("html_content", ""),
+            "hashtags": post.get("hashtags", []),
+            "source": "drive_auto",     # 🤖 자동 배지 트리거
+            "is_reprocess": is_reprocess,  # 🔄 재처리 배지 트리거
+            "drive_file_id": f["id"],
+        })
+
+        # Drive 처리완료로 이동
+        try:
+            move_file_to_folder(f["id"], processed_folder_id)
+            moved_count += 1
+            log_entries.append({
+                "timestamp": datetime.now().isoformat(),
+                "filename": f["name"],
+                "drive_file_id": f["id"],
+                "user_email": current_email,
+                "status": "success",
+                "is_reprocess": is_reprocess,
+            })
+        except Exception as e:
+            move_failed_names.append(f["name"])
+            log_entries.append({
+                "timestamp": datetime.now().isoformat(),
+                "filename": f["name"],
+                "drive_file_id": f["id"],
+                "user_email": current_email,
+                "status": "success_no_move",
+                "error": str(e),
+                "is_reprocess": is_reprocess,
+            })
+
+    # 이력 일괄 추가
+    if history_items_to_add:
+        try:
+            add_to_history(history_items_to_add, user_email=current_email)
+        except Exception as e:
+            st.warning(f"⚠️ 이력 저장 중 오류: {e}")
+
+    # 7. 실패·스킵 로그 기록
+    for fl in failed:
+        f = fl["file_info"]["file"]
+        log_entries.append({
+            "timestamp": datetime.now().isoformat(),
+            "filename": f["name"],
+            "drive_file_id": f["id"],
+            "user_email": current_email,
+            "status": "failed",
+            "error": fl.get("error", "알 수 없는 오류"),
+        })
+    for sk in skipped:
+        log_entries.append({
+            "timestamp": datetime.now().isoformat(),
+            "filename": sk["name"],
+            "drive_file_id": sk["id"],
+            "user_email": current_email,
+            "status": "skipped",
+            "error": "매물번호(7자리) 없음",
+        })
+
+    if log_entries:
+        try:
+            append_auto_log(log_entries)
+        except Exception as e:
+            st.warning(f"⚠️ 자동 처리 로그 저장 실패: {e}")
+
+    # 8. 결과 요약
+    gen_progress.progress(1.0, text="✅ 처리 완료")
+    summary_lines = []
+    if moved_count > 0:
+        summary_lines.append(f"✅ **{moved_count}건 처리 완료** → '처리완료' 폴더로 이동")
+    if move_failed_names:
+        summary_lines.append(
+            f"⚠️ {len(move_failed_names)}건 처리됐으나 Drive 이동 실패 (수동 이동 필요): "
+            + ", ".join(move_failed_names)
+        )
+    if failed:
+        summary_lines.append(f"❌ **{len(failed)}건 실패** (Drive 원위치 유지 → 재시도 가능)")
+
+    if moved_count > 0:
+        st.success("\n\n".join(summary_lines))
+        st.balloons()
+    elif summary_lines:
+        st.warning("\n\n".join(summary_lines))
+
+    if failed:
+        with st.expander(f"❌ 실패 상세 ({len(failed)}건)", expanded=True):
+            for fl in failed:
+                f = fl["file_info"]["file"]
+                st.markdown(f"- **{f['name']}**: {fl.get('error', '알 수 없음')}")
+
+    # 9. 캐시 비우기 → 다음 진입 시 새로 폴링
+    st.session_state.pop("_drive_pending_files", None)
+    st.session_state.pop("_drive_files_check_ts", None)
+
+    # 새로고침 (4번 탭 이력 자동 갱신)
+    time.sleep(2)
+    st.rerun()
+
+
+def _render_drive_sync_area(current_email, target_visa_arg, model_arg, engine_arg):
+    """1번 탭 상단의 Drive 자동 처리 영역 (사장님·사원 공통)."""
+    if not _drive_configured():
+        with st.expander("💡 Google Drive 자동 처리 (설정 필요)", expanded=False):
+            st.caption(
+                "관리자가 사이드바 '🔗 Drive 연결 테스트'에서 설정 후 사용 가능합니다."
+            )
+        return
+
+    # 오늘 폴더 확보 (10분 캐시) — 사장님 요청 Q2-A
+    try:
+        folder_id, folder_name = _ensure_today_folder_cached()
+    except Exception as e:
+        st.error(
+            f"❌ Drive '오늘 폴더({_today_folder_label()})' 확인 실패: {e}\n\n"
+            "사이드바 '🔗 Drive 연결 테스트'로 권한을 다시 확인해주세요."
+        )
+        return
+
+    # 새 파일 폴링 (10분 캐시)
+    try:
+        pending = _refresh_drive_pending(folder_id, force=False)
+    except Exception as e:
+        st.error(f"❌ Drive 파일 조회 실패: {e}")
+        return
+
+    last_check = st.session_state.get("_drive_files_check_ts")
+    last_check_str = last_check.strftime("%H:%M") if last_check else "?"
+
+    with st.container(border=True):
+        # 헤더 + 다시 확인 버튼
+        col1, col2 = st.columns([5, 2])
+        with col1:
+            st.markdown("### 🔄 Google Drive 자동 처리")
+            st.caption(
+                f"📁 오늘 폴더: **{folder_name}**  ·  "
+                f"마지막 확인: {last_check_str}  ·  "
+                f"10분마다 자동 갱신"
+            )
+        with col2:
+            if st.button(
+                "🔄 지금 다시 확인",
+                use_container_width=True,
+                key="drive_refresh_btn",
+            ):
+                try:
+                    _refresh_drive_pending(folder_id, force=True)
+                except Exception as e:
+                    st.error(f"❌ 갱신 실패: {e}")
+                st.rerun()
+
+        # 새 파일 표시
+        if not pending:
+            st.info("✨ 새 도면이 없습니다.")
+        else:
+            # 매물번호 유무 분리
+            with_pn = [f for f in pending if _extract_property_number(f["name"])]
+            without_pn = [f for f in pending if not _extract_property_number(f["name"])]
+
+            if with_pn:
+                st.success(f"🆕 **처리 대상 {len(with_pn)}건** 감지!")
+            if without_pn:
+                st.warning(
+                    f"⚠️ 매물번호 없음 (스킵 대상) **{len(without_pn)}건**"
+                )
+
+            with st.expander(f"📋 파일 목록 ({len(pending)}건)", expanded=False):
+                for f in pending:
+                    name = f["name"]
+                    size_mb = f.get("size", 0) / 1024 / 1024
+                    prop_num = _extract_property_number(name)
+                    if prop_num:
+                        st.markdown(f"- ✅ `{name}` · {size_mb:.1f}MB · 매물번호 {prop_num}")
+                    else:
+                        st.markdown(f"- ⚠️ `{name}` · {size_mb:.1f}MB · 매물번호 없음 (스킵 예정)")
+
+            # 처리 시작 버튼 (사장님·사원 동일)
+            if with_pn:
+                if st.button(
+                    f"🚀 {len(with_pn)}건 자동 처리 시작 (분석 → 블로그 생성 → 이력 저장 → Drive 이동)",
+                    type="primary",
+                    use_container_width=True,
+                    key="drive_process_btn",
+                ):
+                    _process_drive_files(
+                        pending, current_email, target_visa_arg, model_arg, engine_arg
+                    )
+
+        # 자동 처리 로그 (최근 30일)
+        with st.expander("📋 최근 자동 처리 로그 (30일 보관)", expanded=False):
+            try:
+                from src.drive_sync import load_auto_log
+                log = load_auto_log()
+            except ImportError:
+                log = []
+            if not log:
+                st.caption("아직 자동 처리 기록이 없습니다.")
+            else:
+                # 최근 50건, 최신순
+                recent = sorted(
+                    log, key=lambda x: x.get("timestamp", ""), reverse=True
+                )[:50]
+                for entry in recent:
+                    ts = entry.get("timestamp", "")
+                    try:
+                        ts_display = datetime.fromisoformat(ts).strftime("%m/%d %H:%M")
+                    except (ValueError, TypeError):
+                        ts_display = ts
+                    status = entry.get("status", "")
+                    fname = entry.get("filename", "?")
+                    user = entry.get("user_email", "")
+                    if status == "success":
+                        icon = "✅ "
+                    elif status == "success_no_move":
+                        icon = "⚠️ "
+                    elif status == "failed":
+                        icon = "❌ "
+                    elif status == "skipped":
+                        icon = "⏭️ "
+                    else:
+                        icon = "• "
+                    line = f"{icon} `{ts_display}` `{fname}` *({user})*"
+                    if status in ("failed", "skipped", "success_no_move") and entry.get("error"):
+                        err = entry["error"][:120]
+                        line += f"  \n   ↳ {err}"
+                    st.markdown(line)
+
+
+def _today_folder_label() -> str:
+    """오류 메시지용 도쿄 오늘 날짜 라벨."""
+    try:
+        from src.drive_sync import _today_folder_name
+        return _today_folder_name()
+    except Exception:
+        return datetime.now().strftime("%Y%m%d")
+
+
+# ─────────────────────────────────────────────────
 # 4단계 탭
 # ─────────────────────────────────────────────────
 
@@ -1262,8 +1697,16 @@ tab1, tab2, tab3, tab4 = st.tabs(
 
 # ───── Tab 1: 업로드 (병렬 분석) ─────
 with tab1:
-    st.subheader(f"마이소크 (物件図面) 업로드 — 한 번에 최대 {MAX_UPLOADS}개")
-    st.caption("지원 형식: JPG · PNG · WEBP · GIF · PDF")
+    # ──────────────────────────────────────────────
+    # 🔄 Google Drive 자동 처리 영역 (Phase 3)
+    # 사장님·사원 누구나 접근 가능. 새 파일 폴링 + [🚀 처리 시작]
+    # ──────────────────────────────────────────────
+    _render_drive_sync_area(current_email, target_visa, model, engine)
+
+    st.divider()
+
+    st.subheader(f"마이소크 (物件図面) 직접 업로드 — 한 번에 최대 {MAX_UPLOADS}개")
+    st.caption("지원 형식: JPG · PNG · WEBP · GIF · PDF  ·  Drive 안 거치고 즉시 처리할 때 사용")
     st.info(
         "📌 **매물번호 안내**: 파일명 맨 앞에 **7자리 숫자**를 붙여주세요.\n\n"
         "예: `1234567_매물도면.jpg` → 매물번호 **1234567**\n\n"
@@ -1303,14 +1746,29 @@ with tab1:
                 else:
                     st.image(uf, caption=uf.name, use_container_width=True)
 
-        # ⭐ 자동 모드: 분석 완료 후 블로그 생성을 자동으로 이어서 진행 (한 번 클릭으로 끝)
-        auto_generate_enabled = st.checkbox(
-            "🚀 자동 모드 — 분석 완료 시 블로그도 바로 생성",
-            value=True,
-            key="auto_generate_enabled",
-            help="끄면 분석만 하고 2번 탭에서 직접 생성 버튼을 누릅니다. "
-                 "특별 지시사항을 추가하시려면 끄고 수동으로 진행하세요.",
-        )
+        # ⭐ 자동 모드: 분석 완료 후 블로그 생성을 자동으로 이어서 진행
+        # 기본값을 OFF로 변경 (켜져 있으면 4번 탭이 35-70초간 비활성)
+        # 새 탭에서 이력 보관함을 따로 보고 싶으면 옆 버튼 사용
+        _col_auto, _col_newtab = st.columns([3, 2])
+        with _col_auto:
+            auto_generate_enabled = st.checkbox(
+                "🚀 자동 모드 — 분석 후 블로그까지 한 번에 생성",
+                value=False,
+                key="auto_generate_enabled",
+                help=(
+                    "켜면 분석 후 블로그 생성까지 35~70초 끊김 없이 진행. "
+                    "그동안 4번 탭(이력 보관함)이 비활성화됩니다. "
+                    "처리 중에도 이력을 보고 싶으면 오른쪽 [새 탭에서 열기] 버튼 사용."
+                ),
+            )
+        with _col_newtab:
+            _app_url = os.getenv("APP_BASE_URL", "https://jreblog.onrender.com")
+            st.link_button(
+                "🪟 새 탭에서 이력 보관함 열기",
+                _app_url,
+                help="처리 중에도 다른 탭에서 작업 이력 자유롭게 사용 가능",
+                use_container_width=True,
+            )
 
         if st.button("🔍 전체 도면 병렬 분석 시작", type="primary"):
             # ⭐ 이전 분석 결과 완전 초기화 (다른 도면인데 같은 결과 나오는 버그 방지)
@@ -1905,11 +2363,20 @@ with tab4:
 
                 with col_info:
                     fav_badge = " ⭐" if is_fav else ""
+                    # 🤖 자동 처리 / 🔄 재처리 배지 (Phase 3)
+                    source = h.get("source", "manual")
+                    is_reprocess = h.get("is_reprocess", False)
+                    auto_badges = []
+                    if source == "drive_auto":
+                        auto_badges.append("🤖")
+                    if is_reprocess:
+                        auto_badges.append("🔄")
+                    badge_prefix = ("".join(auto_badges) + " ") if auto_badges else ""
                     # 순번 다음에 매물번호 표시 (제목에 이미 있으면 제목만)
                     if prop_num and not title_has_num:
-                        display_title = f"**{idx+1}. [{prop_num}] {title}**{fav_badge}"
+                        display_title = f"**{idx+1}. {badge_prefix}[{prop_num}] {title}**{fav_badge}"
                     else:
-                        display_title = f"**{idx+1}. {title}**{fav_badge}"
+                        display_title = f"**{idx+1}. {badge_prefix}{title}**{fav_badge}"
                     st.markdown(
                         f"{display_title}  \n"
                         f"<span style='color:#888;font-size:13px'>"
