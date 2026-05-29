@@ -205,7 +205,7 @@ def _analyze_with_claude(
     client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
     image_data = _file_to_image_bytes_list(file_path)
 
-    # Claude 이미지 블록 형식
+    # Claude 이미지 블록 형식 (이미지는 매번 다름 → user 메시지)
     image_blocks = []
     for img_bytes, mime in image_data:
         encoded = base64.standard_b64encode(img_bytes).decode("utf-8")
@@ -213,7 +213,10 @@ def _analyze_with_claude(
             "type": "image",
             "source": {"type": "base64", "media_type": mime, "data": encoded},
         })
-    content = image_blocks + [{"type": "text", "text": EXTRACTION_PROMPT}]
+    # 이미지 + 짧은 user 지시 (실제 추출 규칙은 system에 캐싱)
+    user_content = image_blocks + [
+        {"type": "text", "text": "위 마이소크(物件図面)를 system 프롬프트의 추출 규칙에 따라 분석하여 JSON으로 출력하세요."}
+    ]
 
     last_error = None
     for attempt in range(max_retries):
@@ -221,7 +224,16 @@ def _analyze_with_claude(
             response = client.messages.create(
                 model=model,
                 max_tokens=4096,
-                messages=[{"role": "user", "content": content}],
+                # ⭐ Prompt Caching: 안정 추출 규칙(EXTRACTION_PROMPT)을 system에 두고 캐시
+                #    매물 5개 병렬 중 4건은 cache hit → 비용 90%↓, TTFT↓
+                system=[
+                    {
+                        "type": "text",
+                        "text": EXTRACTION_PROMPT,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+                messages=[{"role": "user", "content": user_content}],
             )
             raw_text = response.content[0].text
             return _extract_json(raw_text)

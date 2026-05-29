@@ -16,7 +16,7 @@ import json
 import re
 import time
 from pathlib import Path
-from typing import Optional, Literal
+from typing import Optional, Literal, Callable
 from urllib.parse import quote
 
 import anthropic
@@ -342,6 +342,63 @@ BLOG_GENERATION_PROMPT = """\
 
 각 섹션은 정보 위주로 간결하게. 광고 문구만 채우지 말 것.
 """
+
+
+# ─────────────────────────────────────────────────
+# Prompt Caching 최적화 (Anthropic ephemeral cache)
+# ─────────────────────────────────────────────────
+# BLOG_GENERATION_PROMPT의 변수 부분(스타일·특별지시·매물데이터)은 매 요청마다 변동 →
+# 이를 user 메시지로 분리하고, 안정 부분만 system 메시지에 두면 캐시 hit률이 극대화됨.
+# 효과: TTFT(첫 토큰까지 시간) 약 60-80% 단축, 캐시 hit 부분 비용 90% 절감.
+# 5분 cache TTL — 매물 5개 병렬 + 일배치 안에서 4건 이상 cache hit 기대.
+
+def _build_stable_system_prompt() -> str:
+    """모듈 로드/최초 호출 시 1회만 빌드 (kakao·phone·hashtags는 환경변수/상수)."""
+    return (
+        BLOG_GENERATION_PROMPT
+        # 변수 부분은 user 메시지로 분리 → 안정 부분만 system에 둠
+        .replace(
+            "{style_instructions}",
+            "(스타일 가이드는 user 메시지의 '## 스타일' 섹션 참조)",
+        )
+        .replace(
+            "{custom_instructions}",
+            "(특별 지시사항은 user 메시지의 '## 특별 지시사항' 섹션 참조)",
+        )
+        .replace(
+            "{property_json}",
+            "(매물 데이터는 user 메시지의 '## 매물 데이터' JSON 참조)",
+        )
+        .format(
+            kakao=os.getenv("KAKAO_TALK_ID", "japanreal2"),
+            phone=os.getenv("COMPANY_PHONE", "070-8201-5740"),
+            core_hashtags=" ".join(CORE_HASHTAGS),
+        )
+    )
+
+
+# 모듈 로드 시 1회 빌드 (앱 라이프타임 동안 안정)
+_STABLE_SYSTEM_PROMPT = _build_stable_system_prompt()
+
+
+def _build_user_data_block(
+    style_instructions: str, custom_block: str, property_json: str
+) -> str:
+    """매 요청마다 변경되는 가변 부분 (캐싱되지 않음)."""
+    return f"""# 이번 요청 데이터
+
+## 스타일
+{style_instructions}
+
+## 특별 지시사항
+{custom_block}
+
+## 매물 데이터
+```json
+{property_json}
+```
+
+위 데이터로 system 프롬프트의 모든 지침에 따라 블로그 JSON을 출력하세요."""
 
 
 def _extract_blog_json(raw_text: str) -> dict:
@@ -694,6 +751,7 @@ def generate_blog_post(
     model: str = DEFAULT_MODEL,
     api_key: Optional[str] = None,
     max_retries: int = 3,
+    stream_callback: Optional[Callable[[str], None]] = None,
 ) -> dict:
     """
     부동산 데이터 → 네이버 블로그 글 생성. (실패 방지 재시도 로직 포함)
@@ -743,13 +801,13 @@ def generate_blog_post(
     else:
         custom_block = "(별도 지시사항 없음)"
 
-    prompt = BLOG_GENERATION_PROMPT.format(
+    # ⭐ Prompt Caching 구조: 안정 system + 가변 user 메시지로 분리
+    # _STABLE_SYSTEM_PROMPT는 모듈 로드 시 1회 빌드된 안정 부분 (캐시됨)
+    property_json = json.dumps(prop, ensure_ascii=False, indent=2)
+    user_data_block = _build_user_data_block(
         style_instructions=style_instructions,
-        custom_instructions=custom_block,
-        property_json=json.dumps(prop, ensure_ascii=False, indent=2),
-        kakao=os.getenv("KAKAO_TALK_ID", "japanreal2"),
-        phone=os.getenv("COMPANY_PHONE", "070-8201-5740"),
-        core_hashtags=" ".join(CORE_HASHTAGS),
+        custom_block=custom_block,
+        property_json=property_json,
     )
 
     last_error = None
@@ -763,7 +821,16 @@ def generate_blog_post(
             request_params = {
                 "model": model,
                 "max_tokens": 16384,
-                "messages": [{"role": "user", "content": prompt}],
+                # ⭐ 안정 system 프롬프트에 cache_control 적용 → 캐시 hit 시 비용 90%↓
+                "system": [
+                    {
+                        "type": "text",
+                        "text": _STABLE_SYSTEM_PROMPT,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+                # 가변 데이터만 user 메시지로 (캐싱되지 않음)
+                "messages": [{"role": "user", "content": user_data_block}],
             }
             model_lower = model.lower()
             if "opus-4-7" in model_lower or "opus-4.7" in model_lower:
@@ -780,14 +847,38 @@ def generate_blog_post(
                 }
             # 그 외 모델은 thinking 미사용
 
+            # ⭐ 스트리밍 vs 일반 호출 분기
+            #   - stream_callback 제공 시: messages.stream + 토큰 단위 콜백
+            #   - 없으면: 기존 messages.create (병렬 배치에서 사용)
             try:
-                response = client.messages.create(**request_params)
+                if stream_callback is not None:
+                    # 스트리밍 모드: 실시간 토큰 출력
+                    with client.messages.stream(**request_params) as stream:
+                        for text_delta in stream.text_stream:
+                            try:
+                                stream_callback(text_delta)
+                            except Exception:
+                                # 콜백 실패가 본 처리에 영향 주지 않도록
+                                pass
+                        response = stream.get_final_message()
+                else:
+                    # 일반 호출 (병렬 배치용)
+                    response = client.messages.create(**request_params)
             except Exception as thinking_err:
                 # thinking 파라미터 호환성 문제 시 thinking 없이 재시도 (안전 폴백)
                 err_str = str(thinking_err).lower()
                 if "thinking" in err_str and "thinking" in request_params:
                     request_params.pop("thinking", None)
-                    response = client.messages.create(**request_params)
+                    if stream_callback is not None:
+                        with client.messages.stream(**request_params) as stream:
+                            for text_delta in stream.text_stream:
+                                try:
+                                    stream_callback(text_delta)
+                                except Exception:
+                                    pass
+                            response = stream.get_final_message()
+                    else:
+                        response = client.messages.create(**request_params)
                 else:
                     raise
 
