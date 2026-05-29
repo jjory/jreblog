@@ -1000,6 +1000,43 @@ with st.sidebar:
                     else:
                         st.error(msg)
 
+        # ─── 🔗 Google Drive 연결 (Phase 2 검증) ───
+        st.divider()
+        with st.expander("🔗 Google Drive 연결 테스트 (관리자)", expanded=False):
+            st.caption(
+                "Phase 1(Google Cloud + Drive 설정)이 제대로 됐는지 확인하는 도구. "
+                "관리자만 보임. 자동화 정상 작동 전 필수 검증."
+            )
+            if st.button("🔍 Drive 연결 확인", key="drive_verify_btn", use_container_width=True):
+                with st.spinner("Drive API 호출 중…"):
+                    try:
+                        from src.drive_sync import verify_connection
+                        result = verify_connection()
+                    except ImportError as ie:
+                        st.error(
+                            f"⚠️ drive_sync 모듈 로드 실패: {ie}\n\n"
+                            "→ `requirements.txt`에 `google-api-python-client`와 "
+                            "`google-auth`를 추가하고 Render를 재배포했는지 확인하세요."
+                        )
+                        result = None
+
+                if result is not None:
+                    if result.get("ok"):
+                        st.success("✅ 모든 검증 통과! Phase 3로 진행 가능합니다.")
+                        st.markdown(
+                            f"- **서비스 계정**: `{result['service_account_email']}`\n"
+                            f"- **루트 폴더**: **{result['root_folder_name']}**  \n"
+                            f"  (ID: `{result['root_folder_id']}`)\n"
+                            f"- **쓰기 권한**: ✅ 편집자"
+                        )
+                    else:
+                        st.error(f"❌ 검증 실패\n\n{result.get('error', '알 수 없는 오류')}")
+                        with st.expander("진단 정보 (디버깅용)", expanded=False):
+                            st.json({
+                                k: v for k, v in result.items()
+                                if k != "error"
+                            })
+
     else:
         # 일반 사용자: admin이 설정한 값 자동 사용 (UI에 표시 안 함)
         engine = _admin_settings.get("engine", "hybrid")
