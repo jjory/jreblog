@@ -1108,6 +1108,109 @@ def _generate_worker(property_data, target_visa, style_name, custom_instructions
 
 
 # ─────────────────────────────────────────────────
+# 블로그 일괄 생성 공통 헬퍼 (Tab 1 자동 + Tab 2 수동 공통 사용)
+# ─────────────────────────────────────────────────
+def _run_blog_generation(
+    properties: list,
+    custom_instructions: str,
+    target_visa: str,
+    model: str,
+    current_email: str,
+) -> None:
+    """
+    블로그 일괄 생성 (병렬 처리) + 이력 영구 저장.
+    - Tab 1 자동 모드: 분석 직후 즉시 호출
+    - Tab 2 수동 모드: 사장님이 버튼 클릭 시 호출
+    UI(progress·success·error)를 직접 렌더링하고, 완료 시 st.rerun() 호출.
+    """
+    blog_posts = [None] * len(properties)
+    errors = []
+    progress = st.progress(0.0, text="병렬 생성 시작…")
+
+    with ThreadPoolExecutor(max_workers=MAX_PARALLEL_WORKERS) as executor:
+        future_to_idx = {
+            executor.submit(
+                _generate_worker,
+                prop["data"],
+                target_visa,
+                prop["style"],
+                custom_instructions,
+                model,
+            ): i
+            for i, prop in enumerate(properties)
+        }
+        done = 0
+        total = len(future_to_idx)
+        for future in as_completed(future_to_idx):
+            i = future_to_idx[future]
+            name = properties[i]["filename"]
+            prop_num = properties[i].get("property_number", "")
+            try:
+                post = future.result()
+                if prop_num:
+                    post["html_content"] = _insert_property_number_to_table(
+                        post.get("html_content", ""), prop_num
+                    )
+                blog_posts[i] = {
+                    "filename": name,
+                    "property_number": prop_num,
+                    "post": post,
+                }
+            except Exception as e:
+                errors.append(format_error_korean(e, name))
+            done += 1
+            progress.progress(done / total, text=f"[{done}/{total}] 생성 완료")
+
+    progress.progress(1.0, text="✅ 생성 완료")
+    blog_posts = [bp for bp in blog_posts if bp]
+
+    if blog_posts:
+        st.session_state["blog_posts"] = blog_posts
+        # 디스크에 영구 이력 저장 (작업 이력 보관함에서 조회)
+        new_history_items = []
+        for bp in blog_posts:
+            post = bp["post"]
+            new_history_items.append({
+                "filename": bp["filename"],
+                "property_number": bp.get("property_number", ""),
+                "title": post.get("title", ""),
+                "summary_for_chat": post.get("summary_for_chat", ""),
+                "html_content": post.get("html_content", ""),
+                "hashtags": post.get("hashtags", []),
+            })
+        add_to_history(new_history_items, user_email=current_email)
+        _persist_session()
+
+        # 번역 DB 미등록 항목 수집 → 경고 표시
+        all_untranslated = []
+        for bp in blog_posts:
+            for item in bp["post"].get("untranslated", []):
+                all_untranslated.append(item)
+        seen_keys = set()
+        unique_untranslated = []
+        for item in all_untranslated:
+            k = (item.get("category"), item.get("original"))
+            if k not in seen_keys:
+                seen_keys.add(k)
+                unique_untranslated.append(item)
+        st.session_state["untranslated_alert"] = unique_untranslated
+
+        st.success(
+            f"✅ 블로그 {len(blog_posts)}개 생성 완료! "
+            f"3번 탭에서 확인하시거나, **4️⃣ 작업 이력 보관함 탭**에서 "
+            f"나중에라도 다시 조회할 수 있습니다."
+        )
+        st.balloons()
+        # 2초 대기 후 새로고침 → 이력 보관함 자동 갱신
+        time.sleep(2)
+        st.rerun()
+    if errors:
+        st.error("⚠️ 일부 블로그 생성 실패")
+        for err_msg in errors:
+            st.markdown(err_msg)
+
+
+# ─────────────────────────────────────────────────
 # 4단계 탭
 # ─────────────────────────────────────────────────
 
@@ -1162,6 +1265,15 @@ with tab1:
                     st.info(f"📄 {uf.name}\n(PDF)")
                 else:
                     st.image(uf, caption=uf.name, use_container_width=True)
+
+        # ⭐ 자동 모드: 분석 완료 후 블로그 생성을 자동으로 이어서 진행 (한 번 클릭으로 끝)
+        auto_generate_enabled = st.checkbox(
+            "🚀 자동 모드 — 분석 완료 시 블로그도 바로 생성",
+            value=True,
+            key="auto_generate_enabled",
+            help="끄면 분석만 하고 2번 탭에서 직접 생성 버튼을 누릅니다. "
+                 "특별 지시사항을 추가하시려면 끄고 수동으로 진행하세요.",
+        )
 
         if st.button("🔍 전체 도면 병렬 분석 시작", type="primary"):
             # ⭐ 이전 분석 결과 완전 초기화 (다른 도면인데 같은 결과 나오는 버그 방지)
@@ -1230,9 +1342,26 @@ with tab1:
                 st.session_state["_analysis_done_this_session"] = True
                 # 디스크에 자동 저장 (새 결과로 덮어쓰기)
                 _persist_session(overwrite=True)
-                st.success(
-                    f"✅ {len(properties)}개 도면 분석 완료! 2번 탭에서 확인하세요."
-                )
+
+                # ⭐ 자동 모드: 분석 직후 블로그 생성을 같은 클릭에서 이어서 진행
+                if auto_generate_enabled:
+                    st.success(
+                        f"✅ {len(properties)}개 도면 분석 완료. 블로그 자동 생성을 시작합니다…"
+                    )
+                    st.markdown("---")
+                    st.markdown("### ✍️ 블로그 자동 생성 중")
+                    # 자동 모드는 custom_instructions 없이 진행 (필요 시 자동 모드 끄고 수동)
+                    _run_blog_generation(
+                        properties=properties,
+                        custom_instructions="",
+                        target_visa=target_visa,
+                        model=model,
+                        current_email=current_email,
+                    )
+                else:
+                    st.success(
+                        f"✅ {len(properties)}개 도면 분석 완료! 2번 탭에서 확인하세요."
+                    )
             if errors:
                 st.error("⚠️ 일부 파일 분석 실패")
                 for err_msg in errors:
@@ -1345,101 +1474,14 @@ with tab2:
         st.caption(f"📝 선택된 스타일: {style_summary}")
 
         if st.button(f"✍️ 블로그 {len(properties)}개 일괄 생성", type="primary"):
-            blog_posts = [None] * len(properties)
-            errors = []
-            progress = st.progress(0.0, text="병렬 생성 시작…")
-
-            with ThreadPoolExecutor(max_workers=MAX_PARALLEL_WORKERS) as executor:
-                future_to_idx = {
-                    executor.submit(
-                        _generate_worker,
-                        prop["data"],
-                        target_visa,
-                        prop["style"],
-                        custom_instructions,
-                        model,
-                    ): i
-                    for i, prop in enumerate(properties)
-                }
-
-                done = 0
-                total = len(future_to_idx)
-                for future in as_completed(future_to_idx):
-                    i = future_to_idx[future]
-                    name = properties[i]["filename"]
-                    prop_num = properties[i].get("property_number", "")
-                    try:
-                        post = future.result()
-                        # ⭐ 매물번호는 제목이 아닌 본문 기본정보 표에 삽입
-                        if prop_num:
-                            post["html_content"] = _insert_property_number_to_table(
-                                post.get("html_content", ""), prop_num
-                            )
-                        blog_posts[i] = {
-                            "filename": name,
-                            "property_number": prop_num,
-                            "post": post,
-                        }
-                    except Exception as e:
-                        errors.append(format_error_korean(e, name))
-                    done += 1
-                    progress.progress(
-                        done / total, text=f"[{done}/{total}] 생성 완료"
-                    )
-
-            progress.progress(1.0, text="✅ 생성 완료")
-            blog_posts = [bp for bp in blog_posts if bp]
-
-            if blog_posts:
-                st.session_state["blog_posts"] = blog_posts
-
-                # ⭐ 디스크에 영구 이력 저장 (이력 보관함 expander에서 조회)
-                new_history_items = []
-                for bp in blog_posts:
-                    post = bp["post"]
-                    new_history_items.append({
-                        "filename": bp["filename"],
-                        "property_number": bp.get("property_number", ""),
-                        "title": post.get("title", ""),
-                        "summary_for_chat": post.get("summary_for_chat", ""),
-                        "html_content": post.get("html_content", ""),
-                        "hashtags": post.get("hashtags", []),
-                    })
-                add_to_history(new_history_items, user_email=current_email)
-
-                # 현재 세션도 디스크 저장 (새로고침 대비)
-                _persist_session()
-
-                # ⭐ DB(路線 시트) 미등록 항목 수집 → 경고 표시
-                all_untranslated = []
-                for bp in blog_posts:
-                    post = bp["post"]
-                    for item in post.get("untranslated", []):
-                        all_untranslated.append(item)
-                # 중복 제거
-                seen_keys = set()
-                unique_untranslated = []
-                for item in all_untranslated:
-                    k = (item.get("category"), item.get("original"))
-                    if k not in seen_keys:
-                        seen_keys.add(k)
-                        unique_untranslated.append(item)
-                st.session_state["untranslated_alert"] = unique_untranslated
-
-                st.success(
-                    f"✅ 블로그 {len(blog_posts)}개 생성 완료! "
-                    f"3번 탭에서 확인하시거나, **4️⃣ 작업 이력 보관함 탭**에서 "
-                    f"나중에라도 다시 조회할 수 있습니다."
-                )
-                st.balloons()
-
-                # 2초 대기 후 페이지 새로고침 → 이력 보관함 expander 자동 갱신
-                time.sleep(2)
-                st.rerun()
-            if errors:
-                st.error("⚠️ 일부 블로그 생성 실패")
-                for err_msg in errors:
-                    st.markdown(err_msg)
+            # ⭐ 공통 헬퍼 호출 (Tab 1 자동 모드와 동일 로직)
+            _run_blog_generation(
+                properties=properties,
+                custom_instructions=custom_instructions,
+                target_visa=target_visa,
+                model=model,
+                current_email=current_email,
+            )
 
 # ───── Tab 3: 블로그 미리보기 ─────
 with tab3:
