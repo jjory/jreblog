@@ -72,10 +72,18 @@ class DriveConfigError(Exception):
 
 
 # ─────────────────────────────────────────────────
-# 인증 (모듈 캐시)
+# 인증 (스레드별 캐시 — httplib2 thread-safety 대응)
 # ─────────────────────────────────────────────────
 
-_drive_service = None  # 모듈 캐시: 매번 재인증 안 함
+# 자격증명(Credentials)은 thread-safe — 모듈 전역 캐시 OK
+_drive_credentials = None
+
+# Drive 서비스 객체는 내부적으로 httplib2 기반 → thread-safe NOT
+# → ThreadPoolExecutor에서 5개 워커가 같은 service를 공유하면
+#    SSL 핸드셰이크 상태가 망가져 [SSL: WRONG_VERSION_NUMBER] 오류 발생.
+# 해결: threading.local()로 스레드별 별도 service 인스턴스 유지.
+import threading
+_thread_local = threading.local()
 
 
 def _load_credentials() -> service_account.Credentials:
@@ -116,15 +124,37 @@ def _get_root_folder_id() -> str:
     return fid
 
 
+def _get_credentials_cached() -> service_account.Credentials:
+    """자격증명 로드 (모듈 캐시, 스레드 세이프)."""
+    global _drive_credentials
+    if _drive_credentials is None:
+        _drive_credentials = _load_credentials()
+    return _drive_credentials
+
+
 def get_drive_service():
-    """Drive API 서비스 객체 (캐시됨, 매번 재인증 안 함)."""
-    global _drive_service
-    if _drive_service is None:
-        creds = _load_credentials()
-        _drive_service = build(
-            "drive", "v3", credentials=creds, cache_discovery=False
+    """
+    Drive API 서비스 객체 — **스레드별 별도 인스턴스 유지**.
+
+    ⚠️ 절대로 모듈 전역에 캐시하면 안 됨.
+    google-api-python-client의 httplib2는 thread-safe가 아니어서
+    여러 워커 스레드가 같은 service를 공유하면 SSL 상태가 망가져
+    [SSL: WRONG_VERSION_NUMBER] 오류 발생.
+    """
+    if not hasattr(_thread_local, "service"):
+        creds = _get_credentials_cached()
+        _thread_local.service = build(
+            "drive", "v3",
+            credentials=creds,
+            cache_discovery=False,
         )
-    return _drive_service
+    return _thread_local.service
+
+
+def _invalidate_thread_service():
+    """현재 스레드의 service 폐기 (SSL 오류 등 일시 문제 후 재구성)."""
+    if hasattr(_thread_local, "service"):
+        del _thread_local.service
 
 
 # ─────────────────────────────────────────────────
@@ -374,33 +404,62 @@ def download_file_bytes(file_id: str) -> bytes:
     """
     파일 ID로부터 바이트 다운로드 (메모리 적재).
 
-    Raises:
-        ValueError: 파일이 MAX_FILE_SIZE_BYTES 초과
-    """
-    service = get_drive_service()
-    # 크기 사전 확인
-    meta = service.files().get(
-        fileId=file_id,
-        fields="size, name",
-        supportsAllDrives=True,
-    ).execute()
-    try:
-        size_bytes = int(meta.get("size", 0))
-    except (ValueError, TypeError):
-        size_bytes = 0
-    if size_bytes > MAX_FILE_SIZE_BYTES:
-        raise ValueError(
-            f"파일이 너무 큽니다: {meta.get('name')} "
-            f"({size_bytes / 1024 / 1024:.1f}MB > {MAX_FILE_SIZE_MB}MB 제한)"
-        )
+    SSL/Connection 일시 오류 시 자동 재시도 (최대 3회):
+    - 스레드 로컬 service를 폐기하고 새로 만들어서 재시도
+    - thread-safety 문제를 완전 회피하지 못한 케이스 대비 안전망
 
-    req = service.files().get_media(fileId=file_id, supportsAllDrives=True)
-    buf = io.BytesIO()
-    downloader = MediaIoBaseDownload(buf, req)
-    done = False
-    while not done:
-        _, done = downloader.next_chunk()
-    return buf.getvalue()
+    Raises:
+        ValueError: 파일이 MAX_FILE_SIZE_BYTES 초과 (재시도 안 함)
+    """
+    import ssl as ssl_module
+    import time as time_module
+    import socket as socket_module
+
+    last_error = None
+    for attempt in range(3):
+        try:
+            service = get_drive_service()
+            # 크기 사전 확인
+            meta = service.files().get(
+                fileId=file_id,
+                fields="size, name",
+                supportsAllDrives=True,
+            ).execute()
+            try:
+                size_bytes = int(meta.get("size", 0))
+            except (ValueError, TypeError):
+                size_bytes = 0
+            if size_bytes > MAX_FILE_SIZE_BYTES:
+                raise ValueError(
+                    f"파일이 너무 큽니다: {meta.get('name')} "
+                    f"({size_bytes / 1024 / 1024:.1f}MB > {MAX_FILE_SIZE_MB}MB 제한)"
+                )
+
+            req = service.files().get_media(fileId=file_id, supportsAllDrives=True)
+            buf = io.BytesIO()
+            downloader = MediaIoBaseDownload(buf, req)
+            done = False
+            while not done:
+                _, done = downloader.next_chunk()
+            return buf.getvalue()
+        except (ssl_module.SSLError, ConnectionError, socket_module.error) as e:
+            # 일시적 네트워크/SSL 오류 → 스레드 service 폐기 + 재시도
+            last_error = e
+            _invalidate_thread_service()
+            if attempt < 2:
+                time_module.sleep(0.5 * (attempt + 1))
+                continue
+            raise RuntimeError(
+                f"Drive 다운로드 네트워크 오류 (3회 재시도 후): {e}"
+            ) from e
+        except ValueError:
+            # 파일 크기 초과 등은 재시도해도 의미 없음 → 즉시 전파
+            raise
+        except HttpError as e:
+            # API 오류 (404, 403 등)는 재시도 안 함
+            raise
+    # 이론상 도달 불가
+    raise RuntimeError(f"Drive 다운로드 실패: {last_error}")
 
 
 def move_file_to_folder(file_id: str, target_folder_id: str) -> None:
