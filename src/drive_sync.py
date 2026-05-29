@@ -420,3 +420,81 @@ def move_file_to_folder(file_id: str, target_folder_id: str) -> None:
         fields="id, parents",
         supportsAllDrives=True,
     ).execute()
+
+
+# ─────────────────────────────────────────────────
+# 자동 처리 로그 (Phase 3)
+# 처리 성공·실패·스킵 기록을 디스크에 영구 저장.
+# 30일치 유지, 4번 탭과 1번 탭 expander에서 조회.
+# ─────────────────────────────────────────────────
+
+def _get_auto_log_file():
+    """자동 처리 로그 파일 경로 (persistence와 동일한 영구 디스크)."""
+    try:
+        from src.persistence import HISTORY_FILE
+    except ImportError:
+        from persistence import HISTORY_FILE
+    return HISTORY_FILE.parent / "auto_processing_log.json"
+
+
+def load_auto_log() -> list[dict]:
+    """자동 처리 로그 전체 로드."""
+    log_file = _get_auto_log_file()
+    if not log_file.exists():
+        return []
+    try:
+        with open(log_file, encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, list):
+                return data
+            return []
+    except (json.JSONDecodeError, IOError):
+        return []
+
+
+def append_auto_log(entries: list[dict], retention_days: int = 30) -> None:
+    """
+    자동 처리 결과를 로그에 추가 + 오래된 항목(retention_days 초과) 자동 제거.
+
+    Args:
+        entries: [
+            {
+                "timestamp": ISO 8601 문자열,
+                "filename": str,
+                "drive_file_id": str,
+                "user_email": str,
+                "status": "success" | "success_no_move" | "failed" | "skipped",
+                "is_reprocess": bool (성공 시),
+                "error": str (실패/스킵/no_move 시)
+            }, ...
+        ]
+        retention_days: 보관 일수 (기본 30일)
+    """
+    from datetime import datetime, timedelta
+
+    log_file = _get_auto_log_file()
+    existing = load_auto_log()
+
+    # 새 항목 추가
+    existing.extend(entries)
+
+    # retention_days보다 오래된 항목 제거
+    cutoff = datetime.now(TZ_TOKYO) - timedelta(days=retention_days)
+    fresh = []
+    for e in existing:
+        try:
+            ts_str = e.get("timestamp", "")
+            ts = datetime.fromisoformat(ts_str)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=TZ_TOKYO)
+            if ts >= cutoff:
+                fresh.append(e)
+        except (KeyError, ValueError, TypeError):
+            # 파싱 실패한 항목은 유지 (안전)
+            fresh.append(e)
+
+    # 저장
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_file, "w", encoding="utf-8") as f:
+        json.dump(fresh, f, ensure_ascii=False, indent=2)
+
