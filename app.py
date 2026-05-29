@@ -1591,7 +1591,7 @@ with tab3:
                             width:100%;
                             box-shadow:0 2px 4px rgba(0,0,0,0.1);
                         ">
-                        📋 본문 HTML 복사
+                        📋 서식 포함 복사 (네이버 붙여넣기용)
                     </button>
                     <p id="status-{idx}" style="
                         margin-top:8px;
@@ -1601,16 +1601,32 @@ with tab3:
                         min-height:18px;
                     "></p>
                     <script>
-                        document.getElementById('naver-btn-{idx}').addEventListener('click', function() {{
+                        document.getElementById('naver-btn-{idx}').addEventListener('click', async function() {{
                             const html = {html_json};
                             const status = document.getElementById('status-{idx}');
-                            navigator.clipboard.writeText(html).then(() => {{
-                                status.innerHTML = '✅ 본문 HTML이 클립보드에 복사되었습니다! 네이버 블로그 글쓰기 화면에 붙여넣으세요.';
+                            try {{
+                                // ⭐ 서식 포함(rich) 복사 — 네이버 에디터에 바로 Ctrl+V 하면
+                                //    표·체크리스트·이모지·인사말이 모양 그대로 들어감
+                                const blobHtml = new Blob([html], {{ type: 'text/html' }});
+                                const blobText = new Blob([html], {{ type: 'text/plain' }});
+                                const item = new ClipboardItem({{
+                                    'text/html': blobHtml,
+                                    'text/plain': blobText
+                                }});
+                                await navigator.clipboard.write([item]);
+                                status.innerHTML = '✅ 서식 포함 복사 완료! 네이버 글쓰기 화면에 바로 Ctrl+V';
                                 status.style.color = '#03c75a';
-                            }}).catch(err => {{
-                                status.innerHTML = '❌ 복사 실패: ' + err.message + ' (아래 HTML 다운로드 사용)';
-                                status.style.color = '#d32f2f';
-                            }});
+                            }} catch (err) {{
+                                // 폴백: 일부 구형 브라우저는 ClipboardItem 미지원 → 텍스트로 복사
+                                try {{
+                                    await navigator.clipboard.writeText(html);
+                                    status.innerHTML = '⚠️ 텍스트로만 복사됨 (이 브라우저는 서식 복사 미지원). Chrome 권장.';
+                                    status.style.color = '#e67e22';
+                                }} catch (e2) {{
+                                    status.innerHTML = '❌ 복사 실패: ' + e2.message + ' (아래 HTML 다운로드 사용)';
+                                    status.style.color = '#d32f2f';
+                                }}
+                            }}
                         }});
                     </script>
                     """,
@@ -1618,9 +1634,10 @@ with tab3:
                 )
 
                 st.caption(
-                    "💡 사용법: 위 초록색 버튼으로 **본문 HTML 복사** → 네이버 블로그 "
-                    "글쓰기 페이지 직접 접속 → 우측 위 **'기본 도구'** 옆 ⋮ → "
-                    "**'HTML 편집'** 클릭 → 편집창에 **Ctrl+V** 로 붙여넣기 → 발행"
+                    "💡 **사용법**: 위 초록색 버튼 클릭(서식 포함 복사) → 네이버 블로그 글쓰기 "
+                    "화면에 **Ctrl+V** → 발행.  \n"
+                    "⚠️ 네이버 에디터는 붙여넣을 때 **정렬·글자 크기를 리셋**합니다 (네이버 정책). "
+                    "필요 시 **Ctrl+A 전체선택 → 가운데 정렬 → 글자 15** 한 번이면 글 전체에 적용됩니다."
                 )
 
                 c1, c2 = st.columns(2)
@@ -1643,7 +1660,6 @@ with tab3:
 
 # ───── Tab 4: 작업 이력 보관함 (구 카페발행 탭 위치) ─────
 with tab4:
-    st.subheader("📚 작업 이력 보관함 — 회사 전체 공유")
     try:
         _hist_preview = load_history()
         # 작업 이력은 모든 사용자가 공유 (관리자/사용자 구분 없음)
@@ -1668,7 +1684,7 @@ with tab4:
     except Exception:
         _hist_size = ""
 
-    # 최근 작업 / 가장 오래된 계산 (제목에 표시)
+    # 최근 작업 / 가장 오래된 계산
     _hist_latest = ""
     _hist_oldest = ""
     try:
@@ -1681,10 +1697,9 @@ with tab4:
     except Exception:
         pass
 
-    # Expander 제목 — 4가지 정보 모두 표시 (건수·용량·최근·오래된)
-    _label_prefix = "📚 작업 이력 보관함"
+    # 한 줄 통계+안내 (상단 공간 최소화)
     if _hist_count == 0:
-        _expander_label = f"{_label_prefix} (비어 있음 · 클릭하여 펼치기)"
+        st.caption("🗂️ 비어 있음 · 1·2번 탭에서 블로그 생성 시 자동 저장됨")
     else:
         _parts = [f"{_hist_count}건"]
         if _hist_size:
@@ -1693,15 +1708,9 @@ with tab4:
             _parts.append(f"🆕{_hist_latest}")
         if _hist_oldest:
             _parts.append(f"🗓{_hist_oldest}")
-        _expander_label = f"{_label_prefix} ({' · '.join(_parts)} · 클릭하여 펼치기)"
-
-    # 통계 요약 표시 (건수·용량·최근·오래된)
-    if _hist_count > 0 and _parts:
-        st.caption(" · ".join(_parts))
-    st.caption(
-        "💡 회사 전체 매물 이력이 자동 저장됩니다. "
-        "**영구 보존** · 모든 사용자가 공유 · 수동 삭제 전까지 안 사라집니다."
-    )
+        st.caption(
+            f"🗂️ {' · '.join(_parts)}  ·  영구 보존, 회사 전체 공유"
+        )
 
     # 이력 로드 (실패해도 빈 리스트 반환) — 모든 사용자가 전체 이력 조회
     try:
@@ -1723,23 +1732,21 @@ with tab4:
             "1·2번 탭에서 블로그를 생성하면 자동으로 여기에 저장됩니다."
         )
     else:
-        # 통계는 expander 제목에 표시됨 (건수·용량·최근·오래된)
-        # 상세 통계는 사이드바 "📊 회사 전체 통계"에서 확인
-        # N개월 정리·Excel 리포트는 사이드바로 이동됨
-
-        # 검색
-        search_q = st.text_input(
-            "🔍 검색 (매물번호·제목·파일명)",
-            key="hist_search_v2",
-            placeholder="예: 1234567, 신주쿠, 1K",
-        )
-
-        # ⭐ 즐겨찾기 필터
-        only_favorites = st.checkbox(
-            "⭐ 즐겨찾기만 보기",
-            key="hist_only_favorites_v2",
-            value=False,
-        )
+        # 검색 + 즐겨찾기 필터 — 한 줄에 나란히
+        _col_search, _col_fav = st.columns([4, 1])
+        with _col_search:
+            search_q = st.text_input(
+                "🔍 검색 (매물번호·제목·파일명)",
+                key="hist_search_v2",
+                placeholder="예: 1234567, 신주쿠, 1K",
+                label_visibility="collapsed",
+            )
+        with _col_fav:
+            only_favorites = st.checkbox(
+                "⭐ 즐겨찾기만",
+                key="hist_only_favorites_v2",
+                value=False,
+            )
 
         # 필터링 (매물번호·제목·파일명)
         filtered = history
@@ -1757,22 +1764,20 @@ with tab4:
         if not filtered:
             st.warning(f"'{search_q}' 검색 결과 없음")
         else:
-            st.markdown(f"**검색 결과: {len(filtered)}건**")
-
-            # 선택 삭제 모드
-            col_btn1, col_btn2 = st.columns([1, 5])
-            with col_btn1:
-                if st.button("☑️ 모두 선택", use_container_width=True):
+            # 결과수 캡션 + 모두선택/해제 작은 버튼 — 한 줄에
+            _col_cnt, _col_sel, _col_unsel = st.columns([4, 1, 1])
+            with _col_cnt:
+                st.caption(f"검색 결과 **{len(filtered)}건**")
+            with _col_sel:
+                if st.button("☑️ 전체", key="hist_select_all", use_container_width=True):
                     for h in filtered:
                         st.session_state[f"hist_sel_{h['id']}"] = True
                     st.rerun()
-            with col_btn2:
-                if st.button("⬜ 모두 해제", use_container_width=True):
+            with _col_unsel:
+                if st.button("⬜ 해제", key="hist_unselect_all", use_container_width=True):
                     for h in filtered:
                         st.session_state[f"hist_sel_{h['id']}"] = False
                     st.rerun()
-
-            st.divider()
 
             # 이력 목록 표시
             selected_ids = []
@@ -1833,48 +1838,65 @@ with tab4:
                         unsafe_allow_html=True,
                     )
 
-                # 카톡 요약 표시 (접힘 상태가 기본)
+                # 📂 상세 보기 — 카톡 요약/본문 HTML/다운로드를 한 expander 안에 라디오로 통합
                 summary = h.get("summary_for_chat", "")
+                html = h.get("html_content", "")
+                tags = h.get("hashtags", [])
+
+                _mode_options = []
                 if summary:
-                    with st.expander("📱 카카오톡용 요약 보기", expanded=False):
+                    _mode_options.append("📱 카톡 요약")
+                if html:
+                    _mode_options.append("📄 본문 HTML")
+                _mode_options.append("💾 다운로드")
+
+                with st.expander("📂 상세 보기", expanded=False):
+                    _mode = st.radio(
+                        "보기 모드",
+                        _mode_options,
+                        horizontal=True,
+                        key=f"hist_mode_{hid}",
+                        label_visibility="collapsed",
+                    )
+
+                    if _mode == "📱 카톡 요약":
                         st.code(summary, language=None, wrap_lines=True)
+                    elif _mode == "📄 본문 HTML":
+                        if html:
+                            st.markdown(html, unsafe_allow_html=True)
+                        if tags:
+                            st.markdown("**해시태그**")
+                            st.code(" ".join(tags), language=None)
+                    elif _mode == "💾 다운로드":
+                        dl_col1, dl_col2 = st.columns(2)
+                        with dl_col1:
+                            st.download_button(
+                                "💾 HTML 다운로드",
+                                build_naver_smarteditor_html({
+                                    "title": title,
+                                    "html_content": html,
+                                    "hashtags": tags,
+                                }),
+                                file_name=f"history_{hid}_{Path(filename).stem}.html",
+                                mime="text/html",
+                                key=f"hist_dl_html_{hid}",
+                                use_container_width=True,
+                            )
+                        with dl_col2:
+                            st.download_button(
+                                "📋 JSON 다운로드",
+                                json.dumps(h, ensure_ascii=False, indent=2),
+                                file_name=f"history_{hid}.json",
+                                mime="application/json",
+                                key=f"hist_dl_json_{hid}",
+                                use_container_width=True,
+                            )
 
-                # 추가 작업: 본문 + 다운로드 (펼침)
-                with st.expander("📄 본문 HTML + 해시태그 + 다운로드", expanded=False):
-                    html = h.get("html_content", "")
-                    if html:
-                        st.markdown(html, unsafe_allow_html=True)
-                    tags = h.get("hashtags", [])
-                    if tags:
-                        st.markdown("**해시태그**")
-                        st.code(" ".join(tags), language=None)
-
-                    # 다운로드 버튼들
-                    dl_col1, dl_col2 = st.columns(2)
-                    with dl_col1:
-                        st.download_button(
-                            "💾 HTML 다운로드",
-                            build_naver_smarteditor_html({
-                                "title": title,
-                                "html_content": html,
-                                "hashtags": tags,
-                            }),
-                            file_name=f"history_{hid}_{Path(filename).stem}.html",
-                            mime="text/html",
-                            key=f"hist_dl_html_{hid}",
-                            use_container_width=True,
-                        )
-                    with dl_col2:
-                        st.download_button(
-                            "📋 JSON 다운로드",
-                            json.dumps(h, ensure_ascii=False, indent=2),
-                            file_name=f"history_{hid}.json",
-                            mime="application/json",
-                            key=f"hist_dl_json_{hid}",
-                            use_container_width=True,
-                        )
-
-                st.divider()
+                # 얇은 회색선 (st.divider 대신 — 위아래 큰 패딩 제거)
+                st.markdown(
+                    '<hr style="border:none;border-top:1px solid #eee;margin:6px 0">',
+                    unsafe_allow_html=True,
+                )
 
             # 선택 삭제 + 전체 삭제 버튼
             st.markdown("---")
