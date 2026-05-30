@@ -388,6 +388,16 @@ if _admin_initial_pw:
     init_admin_if_needed(_admin_initial_pw)
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_load_users() -> dict:
+    """
+    load_users() 결과를 60초 캐싱 — 로그인 화면에서 중복 호출 방지.
+    TTL 60초: 새 계정 추가 후 1분 이내에는 반영됨.
+    """
+    from src.persistence import load_users
+    return load_users()
+
+
 def _email_token(email: str) -> str:
     """이메일로부터 URL 토큰 생성 (계정 기억용)"""
     seed = (email + os.getenv("ADMIN_INITIAL_PASSWORD", "secret")).encode("utf-8")
@@ -412,8 +422,7 @@ def _check_login() -> bool:
         expected = _email_token(url_email)
         if url_token == expected:
             # 토큰 검증되면 사용자 정보 다시 로드 (역할 변경 반영)
-            from src.persistence import load_users
-            users = load_users()
+            users = _cached_load_users()
             info = users.get(url_email)
             if info:
                 st.session_state["user"] = {
@@ -447,8 +456,7 @@ def _render_login_screen():
         st.markdown("<br>", unsafe_allow_html=True)
 
         # 관리자 계정 미설정 시 안내
-        from src.persistence import load_users
-        users = load_users()
+        users = _cached_load_users()
         if not users:
             st.error(
                 "⚠️ **관리자 계정이 아직 설정되지 않았습니다.**\n\n"
@@ -616,7 +624,14 @@ if not st.session_state.get("_cleanup_done"):
     st.session_state["_cleanup_done"] = True
 
 
-st.title("🏠 JRE일본부동산")
+st.markdown(
+    '<a href="javascript:void(0)" onclick="window.location.reload();" '
+    'style="text-decoration:none;color:inherit;cursor:pointer;display:inline-block;" '
+    'title="클릭하면 새로고침">'
+    '<h1 style="margin:0 0 0.25rem 0;padding:0;">🏠 JRE일본부동산</h1>'
+    '</a>',
+    unsafe_allow_html=True,
+)
 st.caption(
     f"네이버 블로그 자동작성 시스템 · 마이소크 최대 {MAX_UPLOADS}개 업로드 → "
     "AI 병렬 분석 → 한국어 블로그 일괄 생성"
@@ -869,63 +884,64 @@ with st.sidebar:
 
     st.divider()
 
-    # ─── 관리자 전용: 분석 엔진 + AI 모델 ───
-    # 일반 사용자는 admin이 저장한 기본값 자동 사용
+    # ─── 관리자 설정 (분석 엔진/AI 모델) — 일반 사용자는 admin이 저장한 기본값 자동 사용 ───
     _admin_settings = load_admin_settings()
 
+    # 일반 사용자: admin이 설정한 값 자동 사용 (UI에 표시 안 함)
+    if not is_admin:
+        engine = _admin_settings.get("engine", "hybrid")
+        model = _admin_settings.get("model", "claude-opus-4-7")
+
+    # ─── 🗑 오래된 이력 일괄 정리 (관리자 전용 — 우선 표시) ───
     if is_admin:
-        st.markdown("### 🔬 분석 엔진 (관리자 전용)")
-        has_gemini = bool(os.getenv("GEMINI_API_KEY", "").strip())
-        engine_options = {
-            "hybrid": "🔀 하이브리드 (무료+Claude) ⭐ 추천",
-            "gemini": "🆓 Gemini 무료만",
-            "claude": "💎 Claude 유료만 (최고 정확도)",
-        }
-        engine_keys = list(engine_options.keys())
-        try:
-            engine_idx = engine_keys.index(_admin_settings.get("engine", "hybrid"))
-        except ValueError:
-            engine_idx = 0
-        engine = st.selectbox(
-            "분석 엔진 선택",
-            options=engine_keys,
-            format_func=lambda k: engine_options[k],
-            index=engine_idx,
-            help="이 설정은 모든 사용자에게 적용됩니다.",
-        )
-        if engine in ("hybrid", "gemini") and not has_gemini:
-            st.warning(
-                "⚠️ GEMINI_API_KEY가 설정되지 않았습니다. "
-                "https://aistudio.google.com/apikey 에서 무료 발급 후 "
-                "환경변수에 추가하세요. 현재는 Claude만 사용됩니다."
+        with st.expander("🗑 오래된 이력 일괄 정리 (관리자)", expanded=False):
+            st.caption("💡 즐겨찾기(⭐)는 삭제되지 않습니다.")
+            months_to_clean = st.slider(
+                "몇 개월 이상 삭제?",
+                min_value=1, max_value=24, value=12, step=1,
+                key="cleanup_months_slider_sidebar",
             )
+            confirm_key = f"_confirm_cleanup_sb_{months_to_clean}"
+            if st.button(
+                f"🗑 {months_to_clean}개월+ 삭제",
+                type="secondary",
+                use_container_width=True,
+                key=f"cleanup_btn_sb_{months_to_clean}",
+            ):
+                if st.session_state.get(confirm_key):
+                    deleted = delete_old_history(months_to_clean)
+                    st.session_state.pop(confirm_key, None)
+                    st.success(f"✅ {deleted}건 삭제 완료 (즐겨찾기 보호)")
+                    st.rerun()
+                else:
+                    st.session_state[confirm_key] = True
+                    st.warning("⚠️ 한 번 더 클릭하면 삭제됩니다.")
 
-        st.markdown("### 🤖 AI 모델 (관리자 전용)")
-        model_options = ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"]
+    # ─── 📥 Excel 리포트 다운로드 (모든 사용자) ───
+    with st.expander("📥 Excel 리포트 다운로드", expanded=False):
+        st.caption("💡 전체 매물 이력 + 통계 요약 Excel")
         try:
-            model_idx = model_options.index(_admin_settings.get("model", "claude-opus-4-7"))
-        except ValueError:
-            model_idx = 0
-        model = st.selectbox(
-            "Claude 모델",
-            model_options,
-            index=model_idx,
-            help=(
-                "Opus 4.7: ⭐ 권장 — 최고 정확도 (도면 분석·블로그 생성에 가장 정확)\n"
-                "Sonnet 4.6: 균형형 — 정확도 양호 + 빠름\n"
-                "Haiku 4.5: 가장 빠름 — 간단한 매물·테스트용\n\n"
-                "이 설정은 모든 사용자에게 적용됩니다."
-            ),
-        )
+            _sb_history = load_history()
+            for _h in _sb_history:
+                if not _h.get("user_email"):
+                    _h["user_email"] = ADMIN_EMAIL
+            excel_bytes = _build_excel_report(_sb_history)
+            if excel_bytes:
+                st.download_button(
+                    f"📊 다운로드 ({len(_sb_history)}건)",
+                    excel_bytes,
+                    file_name=f"JRE_매물이력_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+            else:
+                st.warning("⚠️ openpyxl 미설치")
+        except Exception as e:
+            st.error(f"Excel 생성 실패: {e}")
 
-        # 변경되면 즉시 저장 (모든 사용자에게 반영)
-        if engine != _admin_settings.get("engine") or model != _admin_settings.get("model"):
-            save_admin_settings(engine, model)
-            st.caption(f"✅ 모든 사용자에게 적용됨")
-
-        st.divider()
-
-        # ─── 관리자 전용: 사용자 관리 ───
+    # ─── 관리자 전용 영역 (사용자 관리 → 분석 엔진 → AI 모델 → 구글 연결 테스트) ───
+    if is_admin:
+        # ─── 사용자 관리 ───
         with st.expander("👥 사용자 관리 (관리자 전용)", expanded=False):
             users = db_list_users()
             st.caption(f"등록된 사용자: **{len(users)}명**")
@@ -1005,8 +1021,58 @@ with st.sidebar:
                     else:
                         st.error(msg)
 
-        # ─── 🔗 Google Drive 연결 (Phase 2 검증) ───
-        st.divider()
+        # ─── 🔬 분석 엔진 (관리자 전용) ───
+        st.markdown("### 🔬 분석 엔진 (관리자 전용)")
+        has_gemini = bool(os.getenv("GEMINI_API_KEY", "").strip())
+        engine_options = {
+            "hybrid": "🔀 하이브리드 (무료+Claude) ⭐ 추천",
+            "gemini": "🆓 Gemini 무료만",
+            "claude": "💎 Claude 유료만 (최고 정확도)",
+        }
+        engine_keys = list(engine_options.keys())
+        try:
+            engine_idx = engine_keys.index(_admin_settings.get("engine", "hybrid"))
+        except ValueError:
+            engine_idx = 0
+        engine = st.selectbox(
+            "분석 엔진 선택",
+            options=engine_keys,
+            format_func=lambda k: engine_options[k],
+            index=engine_idx,
+            help="이 설정은 모든 사용자에게 적용됩니다.",
+        )
+        if engine in ("hybrid", "gemini") and not has_gemini:
+            st.warning(
+                "⚠️ GEMINI_API_KEY가 설정되지 않았습니다. "
+                "https://aistudio.google.com/apikey 에서 무료 발급 후 "
+                "환경변수에 추가하세요. 현재는 Claude만 사용됩니다."
+            )
+
+        # ─── 🤖 AI 모델 (관리자 전용) ───
+        st.markdown("### 🤖 AI 모델 (관리자 전용)")
+        model_options = ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"]
+        try:
+            model_idx = model_options.index(_admin_settings.get("model", "claude-opus-4-7"))
+        except ValueError:
+            model_idx = 0
+        model = st.selectbox(
+            "Claude 모델",
+            model_options,
+            index=model_idx,
+            help=(
+                "Opus 4.7: ⭐ 권장 — 최고 정확도 (도면 분석·블로그 생성에 가장 정확)\n"
+                "Sonnet 4.6: 균형형 — 정확도 양호 + 빠름\n"
+                "Haiku 4.5: 가장 빠름 — 간단한 매물·테스트용\n\n"
+                "이 설정은 모든 사용자에게 적용됩니다."
+            ),
+        )
+
+        # 변경되면 즉시 저장 (모든 사용자에게 반영)
+        if engine != _admin_settings.get("engine") or model != _admin_settings.get("model"):
+            save_admin_settings(engine, model)
+            st.caption(f"✅ 모든 사용자에게 적용됨")
+
+        # ─── 🔗 Google Drive 연결 테스트 (관리자 전용 — 맨 마지막) ───
         with st.expander("🔗 Google Drive 연결 테스트 (관리자)", expanded=False):
             st.caption(
                 "Phase 1(Google Cloud + Drive 설정)이 제대로 됐는지 확인하는 도구. "
@@ -1042,68 +1108,6 @@ with st.sidebar:
                                 if k != "error"
                             })
 
-    else:
-        # 일반 사용자: admin이 설정한 값 자동 사용 (UI에 표시 안 함)
-        engine = _admin_settings.get("engine", "hybrid")
-        model = _admin_settings.get("model", "claude-opus-4-7")
-
-    st.divider()
-
-    # ─── 📊 회사 전체 통계 (모든 사용자 공개) ───
-    with st.expander("📊 회사 전체 통계", expanded=False):
-        _render_company_stats()
-
-    # ─── 📈 직원별 작업 통계 (모든 사용자 공개) ───
-    with st.expander("📈 직원별 작업 통계", expanded=False):
-        _render_staff_stats()
-
-    # ─── 📥 Excel 리포트 다운로드 (모든 사용자) ───
-    with st.expander("📥 Excel 리포트 다운로드", expanded=False):
-        st.caption("💡 전체 매물 이력 + 통계 요약 Excel")
-        try:
-            _sb_history = load_history()
-            for _h in _sb_history:
-                if not _h.get("user_email"):
-                    _h["user_email"] = ADMIN_EMAIL
-            excel_bytes = _build_excel_report(_sb_history)
-            if excel_bytes:
-                st.download_button(
-                    f"📊 다운로드 ({len(_sb_history)}건)",
-                    excel_bytes,
-                    file_name=f"JRE_매물이력_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                )
-            else:
-                st.warning("⚠️ openpyxl 미설치")
-        except Exception as e:
-            st.error(f"Excel 생성 실패: {e}")
-
-    # ─── 🗑 오래된 이력 정리 (관리자 전용 — 삭제는 신중하게) ───
-    if is_admin:
-        with st.expander("🗑 오래된 이력 일괄 정리 (관리자)", expanded=False):
-            st.caption("💡 즐겨찾기(⭐)는 삭제되지 않습니다.")
-            months_to_clean = st.slider(
-                "몇 개월 이상 삭제?",
-                min_value=1, max_value=24, value=12, step=1,
-                key="cleanup_months_slider_sidebar",
-            )
-            confirm_key = f"_confirm_cleanup_sb_{months_to_clean}"
-            if st.button(
-                f"🗑 {months_to_clean}개월+ 삭제",
-                type="secondary",
-                use_container_width=True,
-                key=f"cleanup_btn_sb_{months_to_clean}",
-            ):
-                if st.session_state.get(confirm_key):
-                    deleted = delete_old_history(months_to_clean)
-                    st.session_state.pop(confirm_key, None)
-                    st.success(f"✅ {deleted}건 삭제 완료 (즐겨찾기 보호)")
-                    st.rerun()
-                else:
-                    st.session_state[confirm_key] = True
-                    st.warning("⚠️ 한 번 더 클릭하면 삭제됩니다.")
-
     st.divider()
     st.caption(
         "💡 **사용 안내**\n\n"
@@ -1111,8 +1115,6 @@ with st.sidebar:
         "⚠️ 같은 시각에 분석을 동시 실행하면 메모리 부족 에러가 날 수 있으니, "
         "가능하면 5~10분 간격을 두고 사용하세요."
     )
-
-
 
     st.divider()
     st.caption(
@@ -1588,8 +1590,8 @@ def _render_drive_sync_area(current_email, target_visa_arg, model_arg, engine_ar
     last_check_str = last_check.strftime("%H:%M") if last_check else "?"
 
     with st.container(border=True):
-        # 헤더 + 다시 확인 버튼
-        col1, col2 = st.columns([5, 2])
+        # 헤더 + 다시 확인 버튼 (헤더 바로 옆에 가깝게 붙임)
+        col1, col2, col_spacer = st.columns([3, 1.4, 4])
         with col1:
             st.markdown("### 🔄 Google Drive 자동 처리")
             st.caption(
@@ -1598,6 +1600,8 @@ def _render_drive_sync_area(current_email, target_visa_arg, model_arg, engine_ar
                 f"10분마다 자동 갱신"
             )
         with col2:
+            # 헤더에 시각적으로 더 붙도록 위쪽 여백 추가
+            st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
             if st.button(
                 "🔄 지금 다시 확인",
                 use_container_width=True,
@@ -1774,16 +1778,74 @@ def _render_naver_copy_button(html_content: str, unique_key: str) -> None:
     )
 
 
+def _render_katok_copy_button(text_content: str, unique_key: str) -> None:
+    """
+    카카오톡 요약 텍스트 복사 버튼 — Tab 4 이력 보관함의 카톡 요약 모드용.
+    원본 st.code() 영역의 자동 복사 아이콘이 우측 끝에 작아서 잘 안 보이는 문제 해결.
+
+    Args:
+        text_content: 복사할 텍스트 (summary_for_chat)
+        unique_key: 버튼 DOM ID에 사용할 식별자
+    """
+    if not text_content:
+        return
+
+    text_json = json.dumps(text_content)  # JS에 안전 전달 (개행·특수문자 보존)
+
+    st.components.v1.html(
+        f"""
+        <button id="katok-btn-{unique_key}"
+            style="
+                background:#FEE500;
+                color:#3C1E1E;
+                border:none;
+                padding:12px 20px;
+                font-size:15px;
+                font-weight:600;
+                border-radius:8px;
+                cursor:pointer;
+                width:100%;
+                box-shadow:0 2px 4px rgba(0,0,0,0.08);
+            ">
+            💬 카톡 요약 복사 (붙여넣기용)
+        </button>
+        <p id="katok-status-{unique_key}" style="
+            margin-top:6px;
+            font-size:12px;
+            color:#555;
+            font-family:sans-serif;
+            min-height:16px;
+        "></p>
+        <script>
+            document.getElementById('katok-btn-{unique_key}').addEventListener('click', async function() {{
+                const text = {text_json};
+                const status = document.getElementById('katok-status-{unique_key}');
+                try {{
+                    await navigator.clipboard.writeText(text);
+                    status.innerHTML = '✅ 복사 완료! 카카오톡에 Ctrl+V';
+                    status.style.color = '#03c75a';
+                }} catch (err) {{
+                    status.innerHTML = '❌ 복사 실패: ' + err.message;
+                    status.style.color = '#d32f2f';
+                }}
+            }});
+        </script>
+        """,
+        height=85,
+    )
+
+
 # ─────────────────────────────────────────────────
 # 4단계 탭
 # ─────────────────────────────────────────────────
 
-tab1, tab2, tab3, tab4 = st.tabs(
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
     [
         "1️⃣ 도면 업로드",
         "2️⃣ 추출 결과·스타일 선택",
         "3️⃣ 블로그 미리보기",
         "4️⃣ 📚 작업 이력 보관함",
+        "5️⃣ 📊 통계",
     ]
 )
 
@@ -2189,9 +2251,11 @@ with tab3:
             ):
                 st.text_input("제목", value=post.get("title", ""), key=f"title_{idx}")
 
-                # ⭐ 카카오톡용 요약 + 복사 버튼 (st.code의 내장 복사 아이콘 사용)
-                st.markdown("**📱 카카오톡용 요약** (우측 상단 📋 아이콘 클릭하면 복사)")
-                st.code(post.get("summary_for_chat", ""), language=None, wrap_lines=True)
+                # ⭐ 카카오톡용 요약 — 큰 노란색 복사 버튼 (눈에 띄게)
+                st.markdown("**📱 카카오톡용 요약**")
+                _render_katok_copy_button(post.get("summary_for_chat", ""), f"tab3_{idx}")
+                with st.expander("👁 요약 내용 미리보기", expanded=False):
+                    st.code(post.get("summary_for_chat", ""), language=None, wrap_lines=True)
 
                 st.markdown("**미리보기**")
                 st.caption("🚨 빨간색 배경의 '⚠️ 현지 확인 필요' 부분은 직접 채워 넣으세요")
@@ -2297,8 +2361,8 @@ with tab4:
             "1·2번 탭에서 블로그를 생성하면 자동으로 여기에 저장됩니다."
         )
     else:
-        # 검색 + 즐겨찾기 필터 — 한 줄에 나란히
-        _col_search, _col_fav = st.columns([4, 1])
+        # 검색 + 즐겨찾기 필터 — 검색창 짧게, 즐겨찾기 왼쪽으로
+        _col_search, _col_fav, _col_blank = st.columns([2, 1, 3])
         with _col_search:
             search_q = st.text_input(
                 "🔍 검색 (매물번호·제목·파일명)",
@@ -2312,6 +2376,7 @@ with tab4:
                 key="hist_only_favorites_v2",
                 value=False,
             )
+        # _col_blank는 의도적으로 빈 공간
 
         # 필터링 (매물번호·제목·파일명)
         filtered = history
@@ -2329,10 +2394,16 @@ with tab4:
         if not filtered:
             st.warning(f"'{search_q}' 검색 결과 없음")
         else:
-            # 결과수 캡션 + 모두선택/해제 작은 버튼 — 한 줄에
-            _col_cnt, _col_sel, _col_unsel = st.columns([4, 1, 1])
-            with _col_cnt:
-                st.caption(f"검색 결과 **{len(filtered)}건**")
+            # 일괄 작업 영역 — 전체/해제/선택삭제를 왼쪽편(블로그 제목 위)에 배치
+            # 카운트는 오른쪽으로
+            # selected_ids는 아래 루프 후에 확정되지만, 이전 rerun의 session_state로 미리 계산
+            _pre_selected = [
+                h["id"] for h in filtered
+                if st.session_state.get(f"hist_sel_{h['id']}")
+            ]
+            _col_sel, _col_unsel, _col_del, _col_spacer, _col_cnt = st.columns(
+                [1.2, 1.2, 1.8, 2, 2.5]
+            )
             with _col_sel:
                 if st.button("☑️ 전체", key="hist_select_all", use_container_width=True):
                     for h in filtered:
@@ -2343,6 +2414,28 @@ with tab4:
                     for h in filtered:
                         st.session_state[f"hist_sel_{h['id']}"] = False
                     st.rerun()
+            with _col_del:
+                _del_label = (
+                    f"🗑️ 삭제 ({len(_pre_selected)})"
+                    if _pre_selected
+                    else "🗑️ 삭제"
+                )
+                if st.button(
+                    _del_label,
+                    key="hist_delete_top",
+                    type="primary" if _pre_selected else "secondary",
+                    disabled=(len(_pre_selected) == 0),
+                    use_container_width=True,
+                    help="체크한 항목 삭제",
+                ):
+                    delete_from_history(_pre_selected)
+                    for sid in _pre_selected:
+                        st.session_state.pop(f"hist_sel_{sid}", None)
+                    st.success(f"✅ {len(_pre_selected)}개 항목 삭제 완료")
+                    st.rerun()
+            # _col_spacer는 빈 공간
+            with _col_cnt:
+                st.caption(f"검색 결과 **{len(filtered)}건**")
 
             # 이력 목록 표시
             selected_ids = []
@@ -2434,7 +2527,10 @@ with tab4:
                     )
 
                     if _mode == "📱 카톡 요약":
-                        st.code(summary, language=None, wrap_lines=True)
+                        # ⭐ 큰 노란색 복사 버튼 (눈에 띄게)
+                        _render_katok_copy_button(summary, f"hist_{hid}")
+                        with st.expander("👁 요약 내용 미리보기", expanded=False):
+                            st.code(summary, language=None, wrap_lines=True)
                     elif _mode == "📄 본문 HTML":
                         if html:
                             # ⭐ 옵션 A: 네이버 발행용 서식 포함 복사 버튼
@@ -2477,23 +2573,9 @@ with tab4:
                     unsafe_allow_html=True,
                 )
 
-            # 선택 삭제 + 전체 삭제 버튼
+            # 하단: 전체 삭제 + 백업 다운로드 (선택 삭제는 상단으로 이동됨)
             st.markdown("---")
-            col_d1, col_d2, col_d3 = st.columns([2, 2, 6])
-            with col_d1:
-                if st.button(
-                    f"🗑️ 선택 항목 삭제 ({len(selected_ids)}개)",
-                    type="primary",
-                    disabled=(len(selected_ids) == 0),
-                    use_container_width=True,
-                ):
-                    delete_from_history(selected_ids)
-                    # 선택 상태 초기화
-                    for sid in selected_ids:
-                        st.session_state.pop(f"hist_sel_{sid}", None)
-                    st.success(f"✅ {len(selected_ids)}개 항목 삭제 완료")
-                    st.rerun()
-
+            col_d2, col_d3 = st.columns([1, 2])
             with col_d2:
                 if st.button(
                     "🗑️ 전체 삭제",
@@ -2522,3 +2604,17 @@ with tab4:
 
 
 
+
+# ───── Tab 5: 📊 통계 (회사 전체 + 직원별, sub-tabs) ─────
+with tab5:
+    st.markdown("### 📊 작업 통계")
+    st.caption("회사 전체 통계와 직원별 작업 현황을 한눈에 확인할 수 있습니다.")
+    st.divider()
+
+    _stats_tab_a, _stats_tab_b = st.tabs(
+        ["📊 회사 전체 통계", "📈 직원별 작업 통계"]
+    )
+    with _stats_tab_a:
+        _render_company_stats()
+    with _stats_tab_b:
+        _render_staff_stats()
