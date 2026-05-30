@@ -28,6 +28,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from zoneinfo import ZoneInfo
+
+# 도쿄 타임존 — Drive 자동 처리 영역의 모든 시간 표시·로그에 사용
+# (Render 서버는 UTC라 datetime.now()를 그대로 쓰면 9시간 차이 발생)
+TZ_TOKYO = ZoneInfo("Asia/Tokyo")
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -1260,33 +1265,39 @@ def _drive_configured() -> bool:
 
 
 def _ensure_today_folder_cached():
-    """오늘 폴더 ID/이름을 session_state에 10분 캐시."""
+    """오늘 폴더 ID/이름을 session_state에 10분 캐시. ⭐ 모든 시간은 도쿄 기준."""
     last_check = st.session_state.get("_today_folder_check_ts")
     cached = st.session_state.get("_today_folder")
-    if cached and last_check and (datetime.now() - last_check).total_seconds() < 600:
+    # 배포 직후 이전 세션의 naive datetime은 폐기 (tz-aware와 비교 시 TypeError 방지)
+    if last_check and last_check.tzinfo is None:
+        last_check = None
+    if cached and last_check and (datetime.now(TZ_TOKYO) - last_check).total_seconds() < 600:
         return cached
     from src.drive_sync import get_or_create_today_folder
     folder_id, folder_name = get_or_create_today_folder()
     st.session_state["_today_folder"] = (folder_id, folder_name)
-    st.session_state["_today_folder_check_ts"] = datetime.now()
+    st.session_state["_today_folder_check_ts"] = datetime.now(TZ_TOKYO)
     return (folder_id, folder_name)
 
 
 def _refresh_drive_pending(folder_id, force=False):
-    """미처리 파일 목록을 session_state에 10분 캐시. force=True면 즉시 갱신."""
+    """미처리 파일 목록을 session_state에 10분 캐시. force=True면 즉시 갱신. ⭐ 모든 시간은 도쿄 기준."""
     last_check = st.session_state.get("_drive_files_check_ts")
     cached = st.session_state.get("_drive_pending_files")
+    # 배포 직후 이전 세션의 naive datetime은 폐기
+    if last_check and last_check.tzinfo is None:
+        last_check = None
     if (
         not force
         and cached is not None
         and last_check
-        and (datetime.now() - last_check).total_seconds() < 600
+        and (datetime.now(TZ_TOKYO) - last_check).total_seconds() < 600
     ):
         return cached
     from src.drive_sync import list_pending_files
     pending = list_pending_files(folder_id)
     st.session_state["_drive_pending_files"] = pending
-    st.session_state["_drive_files_check_ts"] = datetime.now()
+    st.session_state["_drive_files_check_ts"] = datetime.now(TZ_TOKYO)
     return pending
 
 
@@ -1324,7 +1335,7 @@ def _process_drive_files(file_list, current_email, target_visa_arg, model_arg, e
         if skipped:
             entries = [
                 {
-                    "timestamp": datetime.now().isoformat(),
+                    "timestamp": datetime.now(TZ_TOKYO).isoformat(),
                     "filename": f["name"],
                     "drive_file_id": f["id"],
                     "user_email": current_email,
@@ -1363,7 +1374,9 @@ def _process_drive_files(file_list, current_email, target_visa_arg, model_arg, e
     def _dl_and_analyze(item):
         f = item["file"]
         bytes_data = download_file_bytes(f["id"])
-        suffix = "." + f["name"].rsplit(".", 1)[-1].lower()
+        # ⭐ 파일명이 아닌 MIME 기반 확장자 사용 — Drive 사본 ("xxx.pdf의 사본") 대응
+        # list_pending_files가 derived_ext 필드를 채워둠. 없으면 .pdf 기본값.
+        suffix = f.get("derived_ext") or ".pdf"
         return _analyze_worker(bytes_data, suffix, engine_arg, model_arg)
 
     analyzed = []  # [{"file_info":..., "data":..., "error":...}]
@@ -1458,7 +1471,7 @@ def _process_drive_files(file_list, current_email, target_visa_arg, model_arg, e
             move_file_to_folder(f["id"], processed_folder_id)
             moved_count += 1
             log_entries.append({
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now(TZ_TOKYO).isoformat(),
                 "filename": f["name"],
                 "drive_file_id": f["id"],
                 "user_email": current_email,
@@ -1468,7 +1481,7 @@ def _process_drive_files(file_list, current_email, target_visa_arg, model_arg, e
         except Exception as e:
             move_failed_names.append(f["name"])
             log_entries.append({
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now(TZ_TOKYO).isoformat(),
                 "filename": f["name"],
                 "drive_file_id": f["id"],
                 "user_email": current_email,
@@ -1488,7 +1501,7 @@ def _process_drive_files(file_list, current_email, target_visa_arg, model_arg, e
     for fl in failed:
         f = fl["file_info"]["file"]
         log_entries.append({
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(TZ_TOKYO).isoformat(),
             "filename": f["name"],
             "drive_file_id": f["id"],
             "user_email": current_email,
@@ -1497,7 +1510,7 @@ def _process_drive_files(file_list, current_email, target_visa_arg, model_arg, e
         })
     for sk in skipped:
         log_entries.append({
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(TZ_TOKYO).isoformat(),
             "filename": sk["name"],
             "drive_file_id": sk["id"],
             "user_email": current_email,
@@ -1679,7 +1692,7 @@ def _today_folder_label() -> str:
         from src.drive_sync import _today_folder_name
         return _today_folder_name()
     except Exception:
-        return datetime.now().strftime("%Y%m%d")
+        return datetime.now(TZ_TOKYO).strftime("%Y%m%d")
 
 
 def _render_naver_copy_button(html_content: str, unique_key: str) -> None:
