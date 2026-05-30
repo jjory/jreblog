@@ -1682,6 +1682,85 @@ def _today_folder_label() -> str:
         return datetime.now().strftime("%Y%m%d")
 
 
+def _render_naver_copy_button(html_content: str, unique_key: str) -> None:
+    """
+    네이버 발행용 서식 포함 복사 버튼 (Tab 3 미리보기·Tab 4 이력 보관함 공통).
+
+    Args:
+        html_content: 복사할 HTML (post.html_content)
+        unique_key: 버튼·status DOM ID에 사용할 식별자 (Tab 3는 idx, Tab 4는 hid)
+    """
+    if not html_content:
+        st.caption("⚠️ 본문 내용이 없어 복사 버튼을 표시할 수 없습니다.")
+        return
+
+    html_json = json.dumps(html_content)  # JS에 안전 전달
+
+    st.components.v1.html(
+        f"""
+        <button id="naver-btn-{unique_key}"
+            style="
+                background:#03c75a;
+                color:white;
+                border:none;
+                padding:14px 24px;
+                font-size:15px;
+                font-weight:600;
+                border-radius:8px;
+                cursor:pointer;
+                width:100%;
+                box-shadow:0 2px 4px rgba(0,0,0,0.1);
+            ">
+            📋 서식 포함 복사 (네이버 붙여넣기용)
+        </button>
+        <p id="status-{unique_key}" style="
+            margin-top:8px;
+            font-size:13px;
+            color:#555;
+            font-family:sans-serif;
+            min-height:18px;
+        "></p>
+        <script>
+            document.getElementById('naver-btn-{unique_key}').addEventListener('click', async function() {{
+                const html = {html_json};
+                const status = document.getElementById('status-{unique_key}');
+                try {{
+                    // ⭐ 서식 포함(rich) 복사 — 네이버 에디터에 바로 Ctrl+V 하면
+                    //    표·체크리스트·이모지·인사말이 모양 그대로 들어감
+                    const blobHtml = new Blob([html], {{ type: 'text/html' }});
+                    const blobText = new Blob([html], {{ type: 'text/plain' }});
+                    const item = new ClipboardItem({{
+                        'text/html': blobHtml,
+                        'text/plain': blobText
+                    }});
+                    await navigator.clipboard.write([item]);
+                    status.innerHTML = '✅ 서식 포함 복사 완료! 네이버 글쓰기 화면에 바로 Ctrl+V';
+                    status.style.color = '#03c75a';
+                }} catch (err) {{
+                    // 폴백: 일부 구형 브라우저는 ClipboardItem 미지원 → 텍스트로 복사
+                    try {{
+                        await navigator.clipboard.writeText(html);
+                        status.innerHTML = '⚠️ 텍스트로만 복사됨 (이 브라우저는 서식 복사 미지원). Chrome 권장.';
+                        status.style.color = '#e67e22';
+                    }} catch (e2) {{
+                        status.innerHTML = '❌ 복사 실패: ' + e2.message + ' (아래 HTML 다운로드 사용)';
+                        status.style.color = '#d32f2f';
+                    }}
+                }}
+            }});
+        </script>
+        """,
+        height=110,
+    )
+
+    st.caption(
+        "💡 **사용법**: 위 초록색 버튼 클릭(서식 포함 복사) → 네이버 블로그 글쓰기 "
+        "화면에 **Ctrl+V** → 발행.  \n"
+        "⚠️ 네이버 에디터는 붙여넣을 때 **정렬·글자 크기를 리셋**합니다 (네이버 정책). "
+        "필요 시 **Ctrl+A 전체선택 → 가운데 정렬 → 글자 15** 한 번이면 글 전체에 적용됩니다."
+    )
+
+
 # ─────────────────────────────────────────────────
 # 4단계 탭
 # ─────────────────────────────────────────────────
@@ -1705,162 +1784,164 @@ with tab1:
 
     st.divider()
 
-    st.subheader(f"마이소크 (物件図面) 직접 업로드 — 한 번에 최대 {MAX_UPLOADS}개")
-    st.caption("지원 형식: JPG · PNG · WEBP · GIF · PDF  ·  Drive 안 거치고 즉시 처리할 때 사용")
-    st.info(
-        "📌 **매물번호 안내**: 파일명 맨 앞에 **7자리 숫자**를 붙여주세요.\n\n"
-        "예: `1234567_매물도면.jpg` → 매물번호 **1234567**\n\n"
-        "매물번호는 블로그 제목·이력 보관함·검색에 사용됩니다."
-    )
+    # 💡 Drive 안 거치고 직접 업로드 (예외 상황용) — 평소엔 접혀 있음
+    with st.expander("💡 Drive 안 거치고 직접 업로드 (예외 상황용)", expanded=False):
+        st.subheader(f"마이소크 (物件図面) 직접 업로드 — 한 번에 최대 {MAX_UPLOADS}개")
+        st.caption("지원 형식: JPG · PNG · WEBP · GIF · PDF  ·  Drive 안 거치고 즉시 처리할 때 사용")
+        st.info(
+            "📌 **매물번호 안내**: 파일명 맨 앞에 **7자리 숫자**를 붙여주세요.\n\n"
+            "예: `1234567_매물도면.jpg` → 매물번호 **1234567**\n\n"
+            "매물번호는 블로그 제목·이력 보관함·검색에 사용됩니다."
+        )
 
-    uploaded_files = st.file_uploader(
-        f"도면 파일을 최대 {MAX_UPLOADS}개까지 선택하세요",
-        type=["jpg", "jpeg", "png", "webp", "gif", "pdf"],
-        accept_multiple_files=True,
-    )
+        uploaded_files = st.file_uploader(
+            f"도면 파일을 최대 {MAX_UPLOADS}개까지 선택하세요",
+            type=["jpg", "jpeg", "png", "webp", "gif", "pdf"],
+            accept_multiple_files=True,
+        )
 
-    if uploaded_files:
-        if len(uploaded_files) > MAX_UPLOADS:
-            st.warning(f"⚠️ 최대 {MAX_UPLOADS}개까지만 처리됩니다.")
-            uploaded_files = uploaded_files[:MAX_UPLOADS]
+        if uploaded_files:
+            if len(uploaded_files) > MAX_UPLOADS:
+                st.warning(f"⚠️ 최대 {MAX_UPLOADS}개까지만 처리됩니다.")
+                uploaded_files = uploaded_files[:MAX_UPLOADS]
 
-        # 매물번호 미인식 파일 경고
-        no_number_files = [
-            uf.name for uf in uploaded_files
-            if not _extract_property_number(uf.name)
-        ]
-        if no_number_files:
-            st.warning(
-                "⚠️ **다음 파일은 7자리 매물번호가 인식되지 않았습니다:**\n\n"
-                + "\n".join(f"- {n}" for n in no_number_files)
-                + "\n\n매물번호 없이도 진행되지만, 파일명 앞에 7자리 숫자를 "
-                "붙이는 것을 권장합니다. (예: `1234567_원래파일명.jpg`)"
-            )
+            # 매물번호 미인식 파일 경고
+            no_number_files = [
+                uf.name for uf in uploaded_files
+                if not _extract_property_number(uf.name)
+            ]
+            if no_number_files:
+                st.warning(
+                    "⚠️ **다음 파일은 7자리 매물번호가 인식되지 않았습니다:**\n\n"
+                    + "\n".join(f"- {n}" for n in no_number_files)
+                    + "\n\n매물번호 없이도 진행되지만, 파일명 앞에 7자리 숫자를 "
+                    "붙이는 것을 권장합니다. (예: `1234567_원래파일명.jpg`)"
+                )
 
-        st.write(f"**업로드된 파일: {len(uploaded_files)}개**")
-        cols = st.columns(min(len(uploaded_files), MAX_UPLOADS))
-        for i, uf in enumerate(uploaded_files):
-            with cols[i]:
-                if uf.name.lower().endswith(".pdf"):
-                    st.info(f"📄 {uf.name}\n(PDF)")
-                else:
-                    st.image(uf, caption=uf.name, use_container_width=True)
+            st.write(f"**업로드된 파일: {len(uploaded_files)}개**")
+            cols = st.columns(min(len(uploaded_files), MAX_UPLOADS))
+            for i, uf in enumerate(uploaded_files):
+                with cols[i]:
+                    if uf.name.lower().endswith(".pdf"):
+                        st.info(f"📄 {uf.name}\n(PDF)")
+                    else:
+                        st.image(uf, caption=uf.name, use_container_width=True)
 
-        # ⭐ 자동 모드: 분석 완료 후 블로그 생성을 자동으로 이어서 진행
-        # 기본값을 OFF로 변경 (켜져 있으면 4번 탭이 35-70초간 비활성)
-        # 새 탭에서 이력 보관함을 따로 보고 싶으면 옆 버튼 사용
-        _col_auto, _col_newtab = st.columns([3, 2])
-        with _col_auto:
-            auto_generate_enabled = st.checkbox(
-                "🚀 자동 모드 — 분석 후 블로그까지 한 번에 생성",
-                value=False,
-                key="auto_generate_enabled",
-                help=(
-                    "켜면 분석 후 블로그 생성까지 35~70초 끊김 없이 진행. "
-                    "그동안 4번 탭(이력 보관함)이 비활성화됩니다. "
-                    "처리 중에도 이력을 보고 싶으면 오른쪽 [새 탭에서 열기] 버튼 사용."
-                ),
-            )
-        with _col_newtab:
-            _app_url = os.getenv("APP_BASE_URL", "https://jreblog.onrender.com")
-            st.link_button(
-                "🪟 새 탭에서 이력 보관함 열기",
-                _app_url,
-                help="처리 중에도 다른 탭에서 작업 이력 자유롭게 사용 가능",
-                use_container_width=True,
-            )
+            # ⭐ 자동 모드: 분석 완료 후 블로그 생성을 자동으로 이어서 진행
+            # 기본값을 OFF로 변경 (켜져 있으면 4번 탭이 35-70초간 비활성)
+            # 새 탭에서 이력 보관함을 따로 보고 싶으면 옆 버튼 사용
+            _col_auto, _col_newtab = st.columns([3, 2])
+            with _col_auto:
+                auto_generate_enabled = st.checkbox(
+                    "🚀 자동 모드 — 분석 후 블로그까지 한 번에 생성",
+                    value=False,
+                    key="auto_generate_enabled",
+                    help=(
+                        "켜면 분석 후 블로그 생성까지 35~70초 끊김 없이 진행. "
+                        "그동안 4번 탭(이력 보관함)이 비활성화됩니다. "
+                        "처리 중에도 이력을 보고 싶으면 오른쪽 [새 탭에서 열기] 버튼 사용."
+                    ),
+                )
+            with _col_newtab:
+                _app_url = os.getenv("APP_BASE_URL", "https://jreblog.onrender.com")
+                st.link_button(
+                    "🪟 새 탭에서 이력 보관함 열기",
+                    _app_url,
+                    help="처리 중에도 다른 탭에서 작업 이력 자유롭게 사용 가능",
+                    use_container_width=True,
+                )
 
-        if st.button("🔍 전체 도면 병렬 분석 시작", type="primary"):
-            # ⭐ 이전 분석 결과 완전 초기화 (다른 도면인데 같은 결과 나오는 버그 방지)
-            st.session_state.pop("properties", None)
-            st.session_state.pop("blog_posts", None)
-            st.session_state.pop("untranslated_alert", None)
-
-            properties = []
-            errors = []
-            progress = st.progress(0.0, text="병렬 분석 시작…")
-
-            # 파일 미리 읽기 (Streamlit UploadedFile은 thread-safe 안 함)
-            # ⭐ 파일명 중복 방지: 같은 이름이면 인덱스 부여
-            file_jobs = []
-            seen_names = {}
-            for uf in uploaded_files:
-                base_name = uf.name
-                if base_name in seen_names:
-                    seen_names[base_name] += 1
-                    # 같은 파일명 구분 (확장자 앞에 _2, _3)
-                    stem = Path(base_name).stem
-                    suf = Path(base_name).suffix
-                    unique_name = f"{stem}_{seen_names[base_name]}{suf}"
-                else:
-                    seen_names[base_name] = 1
-                    unique_name = base_name
-                file_jobs.append((unique_name, uf.getvalue(), Path(uf.name).suffix))
-
-            with ThreadPoolExecutor(max_workers=MAX_PARALLEL_WORKERS) as executor:
-                # ⭐ 인덱스 기반 매핑 (파일명 중복돼도 결과 안 섞임)
-                future_to_idx = {
-                    executor.submit(_analyze_worker, file_bytes, suffix, engine, model): idx
-                    for idx, (name, file_bytes, suffix) in enumerate(file_jobs)
-                }
-
-                results_by_idx = {}
-                done = 0
-                total = len(future_to_idx)
-                for future in as_completed(future_to_idx):
-                    idx = future_to_idx[future]
-                    name = file_jobs[idx][0]
-                    try:
-                        data = future.result()
-                        results_by_idx[idx] = {
-                            "filename": name,
-                            "property_number": _extract_property_number(name),
-                            "data": data,
-                            "style": default_style,  # 기본 스타일
-                        }
-                    except Exception as e:
-                        errors.append(format_error_korean(e, name))
-                    done += 1
-                    progress.progress(
-                        done / total,
-                        text=f"[{done}/{total}] 분석 완료",
-                    )
-
-            progress.progress(1.0, text="✅ 분석 완료")
-            # 업로드 순서대로 정렬 (인덱스 순)
-            properties = [results_by_idx[i] for i in sorted(results_by_idx.keys())]
-
-            if properties:
-                st.session_state["properties"] = properties
+            if st.button("🔍 전체 도면 병렬 분석 시작", type="primary"):
+                # ⭐ 이전 분석 결과 완전 초기화 (다른 도면인데 같은 결과 나오는 버그 방지)
+                st.session_state.pop("properties", None)
                 st.session_state.pop("blog_posts", None)
-                # 이 세션에서 분석을 했음을 표시 (복원이 덮어쓰지 못하게)
-                st.session_state["_analysis_done_this_session"] = True
-                # 디스크에 자동 저장 (새 결과로 덮어쓰기)
-                _persist_session(overwrite=True)
+                st.session_state.pop("untranslated_alert", None)
 
-                # ⭐ 자동 모드: 분석 직후 블로그 생성을 같은 클릭에서 이어서 진행
-                if auto_generate_enabled:
-                    st.success(
-                        f"✅ {len(properties)}개 도면 분석 완료. 블로그 자동 생성을 시작합니다…"
-                    )
-                    st.markdown("---")
-                    st.markdown("### ✍️ 블로그 자동 생성 중")
-                    # 자동 모드는 custom_instructions 없이 진행 (필요 시 자동 모드 끄고 수동)
-                    _run_blog_generation(
-                        properties=properties,
-                        custom_instructions="",
-                        target_visa=target_visa,
-                        model=model,
-                        current_email=current_email,
-                    )
-                else:
-                    st.success(
-                        f"✅ {len(properties)}개 도면 분석 완료! 2번 탭에서 확인하세요."
-                    )
-            if errors:
-                st.error("⚠️ 일부 파일 분석 실패")
-                for err_msg in errors:
-                    st.markdown(err_msg)
+                properties = []
+                errors = []
+                progress = st.progress(0.0, text="병렬 분석 시작…")
+
+                # 파일 미리 읽기 (Streamlit UploadedFile은 thread-safe 안 함)
+                # ⭐ 파일명 중복 방지: 같은 이름이면 인덱스 부여
+                file_jobs = []
+                seen_names = {}
+                for uf in uploaded_files:
+                    base_name = uf.name
+                    if base_name in seen_names:
+                        seen_names[base_name] += 1
+                        # 같은 파일명 구분 (확장자 앞에 _2, _3)
+                        stem = Path(base_name).stem
+                        suf = Path(base_name).suffix
+                        unique_name = f"{stem}_{seen_names[base_name]}{suf}"
+                    else:
+                        seen_names[base_name] = 1
+                        unique_name = base_name
+                    file_jobs.append((unique_name, uf.getvalue(), Path(uf.name).suffix))
+
+                with ThreadPoolExecutor(max_workers=MAX_PARALLEL_WORKERS) as executor:
+                    # ⭐ 인덱스 기반 매핑 (파일명 중복돼도 결과 안 섞임)
+                    future_to_idx = {
+                        executor.submit(_analyze_worker, file_bytes, suffix, engine, model): idx
+                        for idx, (name, file_bytes, suffix) in enumerate(file_jobs)
+                    }
+
+                    results_by_idx = {}
+                    done = 0
+                    total = len(future_to_idx)
+                    for future in as_completed(future_to_idx):
+                        idx = future_to_idx[future]
+                        name = file_jobs[idx][0]
+                        try:
+                            data = future.result()
+                            results_by_idx[idx] = {
+                                "filename": name,
+                                "property_number": _extract_property_number(name),
+                                "data": data,
+                                "style": default_style,  # 기본 스타일
+                            }
+                        except Exception as e:
+                            errors.append(format_error_korean(e, name))
+                        done += 1
+                        progress.progress(
+                            done / total,
+                            text=f"[{done}/{total}] 분석 완료",
+                        )
+
+                progress.progress(1.0, text="✅ 분석 완료")
+                # 업로드 순서대로 정렬 (인덱스 순)
+                properties = [results_by_idx[i] for i in sorted(results_by_idx.keys())]
+
+                if properties:
+                    st.session_state["properties"] = properties
+                    st.session_state.pop("blog_posts", None)
+                    # 이 세션에서 분석을 했음을 표시 (복원이 덮어쓰지 못하게)
+                    st.session_state["_analysis_done_this_session"] = True
+                    # 디스크에 자동 저장 (새 결과로 덮어쓰기)
+                    _persist_session(overwrite=True)
+
+                    # ⭐ 자동 모드: 분석 직후 블로그 생성을 같은 클릭에서 이어서 진행
+                    if auto_generate_enabled:
+                        st.success(
+                            f"✅ {len(properties)}개 도면 분석 완료. 블로그 자동 생성을 시작합니다…"
+                        )
+                        st.markdown("---")
+                        st.markdown("### ✍️ 블로그 자동 생성 중")
+                        # 자동 모드는 custom_instructions 없이 진행 (필요 시 자동 모드 끄고 수동)
+                        _run_blog_generation(
+                            properties=properties,
+                            custom_instructions="",
+                            target_visa=target_visa,
+                            model=model,
+                            current_email=current_email,
+                        )
+                    else:
+                        st.success(
+                            f"✅ {len(properties)}개 도면 분석 완료! 2번 탭에서 확인하세요."
+                        )
+                if errors:
+                    st.error("⚠️ 일부 파일 분석 실패")
+                    for err_msg in errors:
+                        st.markdown(err_msg)
 
 # ───── Tab 2: 추출 결과 + 파일별 스타일 선택 ─────
 with tab2:
@@ -2106,76 +2187,10 @@ with tab3:
                 st.markdown("**해시태그**")
                 st.code(" ".join(post.get("hashtags", [])), language=None)
 
-                # ⭐ 네이버 발행 보조 — 본문 HTML 클립보드 복사
+                # ⭐ 네이버 발행 보조 — 본문 HTML 클립보드 복사 (공통 헬퍼 사용)
                 st.markdown("---")
                 st.markdown("**✍️ 네이버 블로그 발행 보조**")
-
-                html_content = post.get("html_content", "")
-                html_json = json.dumps(html_content)  # JS에 안전하게 전달
-
-                st.components.v1.html(
-                    f"""
-                    <button id="naver-btn-{idx}"
-                        style="
-                            background:#03c75a;
-                            color:white;
-                            border:none;
-                            padding:14px 24px;
-                            font-size:15px;
-                            font-weight:600;
-                            border-radius:8px;
-                            cursor:pointer;
-                            width:100%;
-                            box-shadow:0 2px 4px rgba(0,0,0,0.1);
-                        ">
-                        📋 서식 포함 복사 (네이버 붙여넣기용)
-                    </button>
-                    <p id="status-{idx}" style="
-                        margin-top:8px;
-                        font-size:13px;
-                        color:#555;
-                        font-family:sans-serif;
-                        min-height:18px;
-                    "></p>
-                    <script>
-                        document.getElementById('naver-btn-{idx}').addEventListener('click', async function() {{
-                            const html = {html_json};
-                            const status = document.getElementById('status-{idx}');
-                            try {{
-                                // ⭐ 서식 포함(rich) 복사 — 네이버 에디터에 바로 Ctrl+V 하면
-                                //    표·체크리스트·이모지·인사말이 모양 그대로 들어감
-                                const blobHtml = new Blob([html], {{ type: 'text/html' }});
-                                const blobText = new Blob([html], {{ type: 'text/plain' }});
-                                const item = new ClipboardItem({{
-                                    'text/html': blobHtml,
-                                    'text/plain': blobText
-                                }});
-                                await navigator.clipboard.write([item]);
-                                status.innerHTML = '✅ 서식 포함 복사 완료! 네이버 글쓰기 화면에 바로 Ctrl+V';
-                                status.style.color = '#03c75a';
-                            }} catch (err) {{
-                                // 폴백: 일부 구형 브라우저는 ClipboardItem 미지원 → 텍스트로 복사
-                                try {{
-                                    await navigator.clipboard.writeText(html);
-                                    status.innerHTML = '⚠️ 텍스트로만 복사됨 (이 브라우저는 서식 복사 미지원). Chrome 권장.';
-                                    status.style.color = '#e67e22';
-                                }} catch (e2) {{
-                                    status.innerHTML = '❌ 복사 실패: ' + e2.message + ' (아래 HTML 다운로드 사용)';
-                                    status.style.color = '#d32f2f';
-                                }}
-                            }}
-                        }});
-                    </script>
-                    """,
-                    height=110,
-                )
-
-                st.caption(
-                    "💡 **사용법**: 위 초록색 버튼 클릭(서식 포함 복사) → 네이버 블로그 글쓰기 "
-                    "화면에 **Ctrl+V** → 발행.  \n"
-                    "⚠️ 네이버 에디터는 붙여넣을 때 **정렬·글자 크기를 리셋**합니다 (네이버 정책). "
-                    "필요 시 **Ctrl+A 전체선택 → 가운데 정렬 → 글자 15** 한 번이면 글 전체에 적용됩니다."
-                )
+                _render_naver_copy_button(post.get("html_content", ""), str(idx))
 
                 c1, c2 = st.columns(2)
                 with c1:
@@ -2409,6 +2424,11 @@ with tab4:
                         st.code(summary, language=None, wrap_lines=True)
                     elif _mode == "📄 본문 HTML":
                         if html:
+                            # ⭐ 옵션 A: 네이버 발행용 서식 포함 복사 버튼
+                            # (Tab 3 안 거치고 Tab 4에서 바로 발행 가능 — Drive 자동 처리 후 일상 흐름)
+                            st.markdown("**✍️ 네이버 블로그 발행 보조**")
+                            _render_naver_copy_button(html, f"hist_{hid}")
+                            st.markdown("**미리보기**")
                             st.markdown(html, unsafe_allow_html=True)
                         if tags:
                             st.markdown("**해시태그**")
