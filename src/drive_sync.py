@@ -52,8 +52,19 @@ PROCESSED_SUBFOLDER_NAME = "처리완료"
 MAX_FILE_SIZE_MB = 30
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
-# 지원 확장자 (analyzer.py와 동일)
+# 지원 확장자 (analyzer.py와 동일) — 백워드 호환용
 SUPPORTED_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".pdf"}
+
+# ⭐ MIME 타입 → 확장자 매핑 (파일명에 의존 안 함)
+# Drive에서 "사본 만들기" 했을 때 파일명이 "xxx.pdf의 사본"처럼 비정상이 되어도
+# Drive는 정확한 mimeType을 알려주므로 이걸로 식별·확장자 결정.
+MIME_TO_EXT = {
+    "application/pdf": ".pdf",
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
 
 # 일본 시간 기준 (사장님 사무실: 도쿄)
 TZ_TOKYO = ZoneInfo("Asia/Tokyo")
@@ -363,10 +374,13 @@ def list_pending_files(date_folder_id: str) -> list[dict]:
     date_folder_id 안의 미처리 파일 (처리완료 하위 폴더 제외).
 
     - createdTime 오름차순 (Drive 업로드 시간순 — 사장님 요청 #5)
-    - 지원 확장자만 (JPG/PNG/WEBP/GIF/PDF)
+    - ⭐ MIME 타입 기반 필터 (PDF/JPG/PNG/WEBP/GIF)
+      파일명 확장자에 의존 안 함 → "xxx.pdf의 사본" 같은 Drive 사본도 정상 식별.
+    - 각 파일에 `derived_ext` 필드 추가 (분석 파이프라인에서 파일 처리 시 사용)
 
     Returns:
-        [{"id": str, "name": str, "createdTime": str, "size": int, "mimeType": str}, ...]
+        [{"id": str, "name": str, "createdTime": str, "size": int,
+          "mimeType": str, "derived_ext": str}, ...]
     """
     service = get_drive_service()
     # 파일만 (폴더 제외), 휴지통 제외
@@ -385,13 +399,14 @@ def list_pending_files(date_folder_id: str) -> list[dict]:
     ).execute()
     files = resp.get("files", [])
 
-    # 지원 확장자만 + size를 int로 변환
+    # MIME 타입 기반 필터 + size를 int로 + derived_ext 추가
     result = []
     for f in files:
-        name = f.get("name", "")
-        ext = ("." + name.rsplit(".", 1)[-1].lower()) if "." in name else ""
-        if ext not in SUPPORTED_EXTS:
+        mime = f.get("mimeType", "")
+        if mime not in MIME_TO_EXT:
+            # 지원 안 되는 MIME → 스킵 (구글 문서, Excel 등)
             continue
+        f["derived_ext"] = MIME_TO_EXT[mime]
         try:
             f["size"] = int(f.get("size", 0))
         except (ValueError, TypeError):
