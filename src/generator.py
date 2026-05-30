@@ -710,30 +710,81 @@ def _extract_ward_from_address(address: str) -> str:
     return ""
 
 
+def _extract_prefecture_korean(address: str) -> str:
+    """
+    주소에서 도도후켄(都道府県)을 추출해 한글로 변환.
+
+    예:
+      "東京都板橋区..."   → "도쿄도"
+      "神奈川県川崎市..." → "가나가와현"
+      "埼玉県さいたま市..."→ "사이타마현"
+      "千葉県船橋市..."   → "치바현"
+      "板橋区..." (도도후켄 없음) → ""  (사장님 결정 B: 누락 시 생략)
+    """
+    if not address:
+        return ""
+
+    # 도도후켄 한자 → 한글 매핑 (도쿄 외곽 + 수도권 중심)
+    PREFECTURE_MAP = {
+        "東京都": "도쿄도",
+        "神奈川県": "가나가와현",
+        "埼玉県": "사이타마현",
+        "千葉県": "치바현",
+        "茨城県": "이바라키현",
+        "栃木県": "토치기현",
+        "群馬県": "군마현",
+        "山梨県": "야마나시현",
+        "静岡県": "시즈오카현",
+        # 대도시권 외 — 만일을 대비
+        "大阪府": "오사카부",
+        "京都府": "교토부",
+        "北海道": "홋카이도",
+    }
+    # 주소 시작 부분에서 매칭 (긴 것 먼저 — 神奈川県이 県 하나보다 먼저)
+    for jp_pref, ko_pref in sorted(PREFECTURE_MAP.items(), key=lambda x: -len(x[0])):
+        if address.startswith(jp_pref) or jp_pref in address[:20]:
+            return ko_pref
+    return ""  # 도도후켄 누락 → 생략 (옵션 B)
+
+
 def _build_standard_title(property_data: dict) -> str:
     """
     매물 정보로부터 표준 형식의 블로그 제목 생성.
 
-    형식:
-    [지역] [노선] [역]역 도보 [분]분 [방구조] 월세 ¥[금액]+관리비 ¥[금액]
+    형식 (사장님 확정):
+    [토도후켄] [행정구역] [노선] [역]역 도보 [분]분 [방구조] 월세 ¥[금액]+관리비 ¥[금액]
 
     예시:
-    - 이타바시구 도부토조선 나리마스역 도보 5분 1K 월세 ¥71,000+관리비 ¥3,000
-    - 신주쿠구 JR 야마노테선 신주쿠역 도보 3분 1R 월세 ¥88,000+관리비 ¥5,000
+    - 도쿄도 이타바시구 도부토조선 토키와다이역 도보 10분 1K 월세 ¥77,000+관리비 ¥5,000
+    - 가나가와현 나카하라구 JR 남부선 무코우가하라역 도보 8분 1K 월세 ¥79,000+관리비 ¥9,000
+
+    토도후켄 추출 실패 시 (옵션 B): 생략하고 종전 형식 유지
+    - 이타바시구 도부토조선 토키와다이역 도보 10분 1K 월세 ¥77,000+관리비 ¥5,000
 
     데이터가 부족하면 가능한 부분만 채워 자연스럽게 생성.
     """
     parts = []
 
-    # 1. 지역 (구/시) — 일본어 주소를 한국어로 번역
     address = property_data.get("address") or ""
+
+    # 0. 토도후켄 (주소에서 추출, 없으면 생략)
+    prefecture = _extract_prefecture_korean(address)
+    if prefecture:
+        parts.append(prefecture)
+
+    # 1. 지역 (구/시) — 일본어 주소를 한국어로 번역
     # 먼저 번역 사전으로 시도 (埼玉県川口市 → 사이타마현 카와구치시)
     ward = translate_ward(address)
     # 번역 사전에 없으면 기존 추출 로직 폴백
     if not ward or ward == address:
         ward = _extract_ward_from_address(address)
     if ward:
-        parts.append(ward)
+        # 토도후켄 한글이 이미 ward 안에 포함된 경우 중복 제거
+        # (예: prefecture="도쿄도", ward="도쿄도 신주쿠구" → ward를 "신주쿠구"로)
+        if prefecture and ward.startswith(prefecture):
+            ward = ward[len(prefecture):].strip()
+        if ward:  # 빈 문자열 방지
+            parts.append(ward)
 
     # 2. 노선 + 역 + 도보 — 일본어를 한국어로 번역
     station = property_data.get("nearest_station") or {}

@@ -89,6 +89,7 @@ LINE_MAP = {
     "日暮里・舎人ライナー": "니포리-토네리 라이너",
     "東武伊勢崎線": "토부 이세사키선",
     "東武東上線": "도부토조선",
+    "東上線": "도부토조선",
     "東武亀戸線": "도부 가메이도선",
     "東武大師線": "도부대사선",
     "京成本線": "게이세이 본선",
@@ -233,7 +234,7 @@ STATION_MAP = {
     "明大前": "메이다이마에", "明治神宮前": "메이지진구마에", "目白": "메지로",
     "森下": "모리시타", "門前仲町": "몬젠나카초", "茗荷谷": "묘가다니",
     "武蔵新田": "무사시닛타", "武蔵関": "무사시세키", "武蔵小金井": "무사시코가네이",
-    "武蔵小山": "무사시코야마", "向原": "무코우하라", "南千住": "미나미센주",
+    "武蔵小山": "무사시코야마", "向原": "무코우하라", "向河原": "무코우가하라", "南千住": "미나미센주",
     "南砂町": "미나미스나마치", "南阿佐ヶ谷": "미나미아사가야", "三ノ輪": "미노와",
     "三ノ輪橋": "미노와바시", "見沼代親水公園": "미누마다이신스이코엔",
     "宮前平": "미야마에다이라", "宮崎台": "미야자키다이", "三河島": "미카와시마",
@@ -310,7 +311,7 @@ STATION_MAP = {
     "高井戸": "타카이도", "滝野川一丁目": "타키노가와잇초메", "天王洲アイル": "텐노즈아일",
     "天空橋": "텐쿠바시", "舎人": "토네리", "戸田": "토다",
     "戸田公園": "토다코엔", "東大前": "토다이마에", "等々力": "토도로키",
-    "都立家政": "토리츠카세이", "曳舟": "히키후네", "ときわ台": "토키와다이",
+    "都立家政": "토리츠카세이", "曳舟": "히키후네", "ときわ台": "토키와다이", "常盤台": "토키와다이",
     "羽田空港国内線ターミナル": "하네다공항국내선터미널", "原宿": "하라주쿠",
     "浜田山": "하마다야마", "浜松町": "하마마츠초", "浜町": "하마마치",
     "蓮沼": "하스누마", "初台": "하츠다이", "八幡山": "하치만야마",
@@ -368,9 +369,13 @@ def translate_line(line: str) -> str:
     # 운영사 접두어 처리 — 接頭辞를 한글로 변환하거나 떼고, 나머지 노선명을 사전에서 찾음
     # ⚠️ 긴 접두어를 먼저 두어야 함 (예: 京王電鉄 > 京王 — 京王 단독은 노선명 일부라 안 넣음)
     operator_prefixes = [
-        # 도쿄 지하철 — 운영사명을 한글로 명시 (도에이/도쿄메트로)
-        ("東京メトロ", "도쿄메트로 "),
+        # 도도후켄 + 도쿄 지하철 결합 케이스 (긴 것 먼저)
+        ("東京都営地下鉄", "도에이 "),
+        ("東京都営", "도에이 "),       # 東京都営浅草線 → 도에이 아사쿠사선
         ("東京都交通局", "도에이 "),
+        ("東京メトロ", "도쿄메트로 "),
+        ("東京都", ""),                # 東京都 단독 — 단순 제거 (노선명 아님)
+        # 도쿄 지하철 단독
         ("都営地下鉄", "도에이 "),
         ("都営", "도에이 "),
         # 사철(私鉄) — 한국어 블로그에서는 운영사명 생략하고 노선명만 사용 (관례)
@@ -588,3 +593,64 @@ def detect_untranslated(property_data: dict) -> list:
             seen.add(key)
             unique.append(item)
     return unique
+
+
+# ─────────────────────────────────────────────────────────
+# Google Sheets 하이브리드 동기화 (Phase: 시트 병합)
+# 사장님이 관리하시는 스프레드시트의 매핑을 자동으로 가져와서
+# 위 하드코딩 LINE_MAP/STATION_MAP/WARD_MAP에 "추가" (덮어쓰기 X).
+# 시트 실패 시 silent fallback — 앱은 항상 정상 동작.
+# ─────────────────────────────────────────────────────────
+
+def _merge_sheet_mappings_once() -> dict:
+    """
+    모듈 로드 시점에 1회 호출 — 시트에서 매핑 가져와서 위 딕셔너리에 추가.
+
+    Returns:
+        병합 통계 {"lines_added": N, "stations_added": N, "wards_added": N}
+        시트 미사용/실패: {"lines_added": 0, ...}
+    """
+    stats = {"lines_added": 0, "stations_added": 0, "wards_added": 0}
+
+    try:
+        # 지연 import — sheet_sync가 없거나 시트 미설정이어도 에러 안 남
+        try:
+            from src.sheet_sync import load_translation_from_sheet
+        except ImportError:
+            from sheet_sync import load_translation_from_sheet
+
+        sheet_data = load_translation_from_sheet()
+        if sheet_data is None:
+            return stats  # 시트 미설정 or 실패 → 하드코딩만 사용
+
+        # 충돌 정책: 하드코딩이 우선 — 시트는 "없는 키만" 추가
+        for jp, ko in sheet_data.get("lines", {}).items():
+            if jp not in LINE_MAP:
+                LINE_MAP[jp] = ko
+                stats["lines_added"] += 1
+
+        for jp, ko in sheet_data.get("stations", {}).items():
+            if jp not in STATION_MAP:
+                STATION_MAP[jp] = ko
+                stats["stations_added"] += 1
+
+        for jp, ko in sheet_data.get("wards", {}).items():
+            if jp not in WARD_MAP:
+                WARD_MAP[jp] = ko
+                stats["wards_added"] += 1
+
+    except Exception as e:
+        # 어떤 에러든 silent — 하드코딩으로 동작 보장
+        import sys
+        print(f"[translation_db] 시트 병합 실패 (하드코딩만 사용): {e}", file=sys.stderr)
+
+    return stats
+
+
+# 모듈 로드 시점에 1회 자동 실행 (앱 시작 시 1회만)
+_SHEET_MERGE_STATS = _merge_sheet_mappings_once()
+
+
+def get_sheet_merge_stats() -> dict:
+    """관리자 UI에서 시트 병합 결과 조회용."""
+    return dict(_SHEET_MERGE_STATS)
