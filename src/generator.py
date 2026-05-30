@@ -211,6 +211,22 @@ BLOG_GENERATION_PROMPT = """\
 
 # html_content 구성 가이드 (이 순서 그대로, 각 섹션 사이 빈 줄)
 
+# ⭐⭐ HTML 단락 분리 규칙 (가독성의 핵심) ⭐⭐
+**한 <p> 태그 안에 한 문장만 작성하세요.** 한 단락에 여러 문장 절대 금지.
+각 문장 끝에 </p>로 닫고, 다음 문장은 새로운 <p>로 시작하세요.
+의미 그룹(예: 매물 소개 → 위치 설명) 사이에는 <p><br/></p>로 빈 줄 한 번 더 삽입.
+
+✅ 좋은 예시 (반드시 이렇게):
+<p>오늘 소개해 드릴 매물은 시나가와구에 있는 1K 원룸이에요.</p>
+<p>도에이 아사쿠사선 타카나와다이역에서 도보 4분 거리입니다.</p>
+<p>월세 ¥115,000 + 관리비 ¥5,000으로 시나가와·고탄다가 가까워요 😊</p>
+<p><br/></p>
+<p>시나가와는 신칸센과 공항 리무진까지 닿는 교통 허브이고, 고탄다는 야마노테선이 지나갑니다.</p>
+<p>타카나와다이역에서 아사쿠사선을 타면 신바시·니혼바시도 환승 없이 연결돼요.</p>
+
+❌ 절대 금지 (한 <p>에 여러 문장 묶기):
+<p>오늘 소개해 드릴 매물은 시나가와구에 있는 1K 원룸이에요. 도에이 아사쿠사선 타카나와다이역에서 도보 4분, 월세 ¥115,000 + 관리비 ¥5,000으로 시나가와·고탄다가 가까운 위치랍니다 😊</p>
+
 ⭐ **섹션 헤더는 반드시 다음 이모지 그대로 사용** (스타일 가이드와 무관하게 고정):
    - <h2>📋 매물 기본정보</h2>
    - <h2>🏠 방 구조와 설비</h2>
@@ -492,7 +508,79 @@ FIXED_GREETING_HTML = (
 )
 
 
-def _apply_naver_formatting(html: str) -> str:
+def _split_long_paragraphs(html: str) -> str:
+    """
+    AI가 한 <p> 안에 여러 문장을 묶어서 작성한 경우, 자동으로 분리.
+    각 문장이 독립된 <p> 태그를 갖도록 → 네이버 블로그에서 줄바꿈 명확.
+
+    분리 기준:
+    - 마침표/물음표/느낌표 (. ! ?) + 공백 + 한글 시작 문자
+    - 또는 자주 쓰는 문장 끝 이모지(😊🌸✨) + 공백 + 한글 시작
+
+    보호 대상 (분리 안 함):
+    - 표 셀(<td>, <th>) 안의 내용 — 표 구조 보존
+    - 빈 <p><br/></p> — 빈 줄 그대로
+    - 짧은 한 문장만 있는 <p> — 그대로
+
+    예시:
+    <p>매물은 1K입니다. 도보 4분이에요. 월세 ¥115,000입니다.</p>
+    →
+    <p>매물은 1K입니다.</p>
+    <p>도보 4분이에요.</p>
+    <p>월세 ¥115,000입니다.</p>
+    """
+    # 분리 정규식: 마침표/?/!/문장끝이모지 + 공백 + 한글 시작 (영문 대문자는 ¥나 영문 매물명 보호 위해 제외)
+    # (?<=...) lookbehind는 다음 문장이 한글로 시작할 때만 분리
+    SENTENCE_BOUNDARY = re.compile(
+        r'(?<=[.!?😊🌸✨])\s+(?=[가-힣])',
+        re.UNICODE
+    )
+
+    def _split_one_p(m):
+        attrs = m.group(1) or ""
+        content = m.group(2)
+
+        # 빈 <p> 또는 <br/>만 있는 <p>는 그대로 (빈 줄 보존)
+        stripped = re.sub(r'<br\s*/?>', '', content).strip()
+        if not stripped:
+            return m.group(0)
+
+        # 분리 시도
+        parts = SENTENCE_BOUNDARY.split(content)
+        if len(parts) <= 1:
+            return m.group(0)  # 단일 문장 → 그대로
+
+        # 각 조각을 별도 <p>로 (원래 attrs 그대로 유지)
+        rebuilt = []
+        for piece in parts:
+            piece = piece.strip()
+            if piece:
+                rebuilt.append(f'<p{attrs}>{piece}</p>')
+        return '\n'.join(rebuilt)
+
+    # <p>...</p> 패턴 매칭 (표 셀 안에는 보통 <p>를 안 쓰므로 안전)
+    # 비탐욕(.*?) + DOTALL로 줄바꿈 있는 <p>도 처리
+    return re.sub(r'<p([^>]*)>(.*?)</p>', _split_one_p, html, flags=re.DOTALL)
+
+
+def _add_section_spacing(html: str) -> str:
+    """
+    섹션 헤더(<h2>) 앞에 빈 줄 한 번 더 보장 → 네이버에서 시각적 분리.
+    이미 빈 <p><br/></p>가 직전에 있으면 추가 안 함.
+    """
+    # <h2> 직전에 빈 줄이 없으면 삽입
+    # (이미 있으면 중복 방지)
+    def _insert_blank(m):
+        before = m.group(1)
+        h2_open = m.group(2)
+        if '<br' in before[-40:] and '<p' in before[-40:]:
+            return m.group(0)  # 직전에 빈 <p><br/></p> 있음 → 그대로
+        return before + '\n<p><br/></p>\n' + h2_open
+
+    return re.sub(r'(.{0,60})(<h2[^>]*>)', _insert_blank, html, flags=re.DOTALL)
+
+
+
     """
     네이버 블로그용 최종 포맷팅 (복사 붙여넣기만으로 게재 가능하게).
     - 본문 문단·헤더·리스트에 가운데 정렬 + 폰트 크기를 inline style로 주입
@@ -925,6 +1013,10 @@ def generate_blog_post(
             if result.get("html_content"):
                 result["html_content"] = _ensure_table_styles(result["html_content"])
                 result["html_content"] = _highlight_check_needed(result["html_content"])
+                # ⭐ 단락 자동 분리: 한 <p>에 여러 문장 묶인 케이스 자동 분리 (가독성)
+                result["html_content"] = _split_long_paragraphs(result["html_content"])
+                # ⭐ 섹션 헤더 앞에 빈 줄 보장 (네이버에서 시각적 분리)
+                result["html_content"] = _add_section_spacing(result["html_content"])
                 # ⭐ 네이버용 최종 포맷팅: 가운데 정렬 + 폰트 + 상단 고정 인사말
                 result["html_content"] = _apply_naver_formatting(result["html_content"])
 
