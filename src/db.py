@@ -95,6 +95,19 @@ def init_db() -> None:
             cur.execute(_CREATE_TABLE_SQL)
 
 
+# 프로세스당 1회만 테이블 생성 시도 (Streamlit 재실행마다 호출돼도 가볍게 통과)
+_initialized = False
+
+
+def _ensure_initialized() -> None:
+    """테이블이 없으면 만든다. 프로세스당 실제 생성 시도는 1회."""
+    global _initialized
+    if _initialized:
+        return
+    init_db()
+    _initialized = True
+
+
 def healthcheck() -> dict:
     """
     연결·테이블 상태 점검 (관리자 UI/테스트용).
@@ -263,6 +276,62 @@ def delete_old(days: int = 14) -> int:
                 (str(days),),
             )
             return cur.rowcount
+
+
+# ── app.py 연동용 안전 다리 함수 ─────────────────────────
+# 핵심: 이 함수들은 **절대 예외를 밖으로 던지지 않는다.**
+# DB가 미설정이거나 저장에 실패해도 (False, 사유)만 돌려주므로,
+# 블로그 처리 흐름(app.py)이 DB 문제로 멈추는 일이 없다.
+
+def save_extracted(
+    property_number: str = "",
+    filename: str = "",
+    drive_file_id: Optional[str] = None,
+    data: Optional[dict] = None,
+    source: str = "",
+) -> tuple:
+    """
+    추출 결과 1건을 物件DB에 안전 저장.
+    Returns: (ok: bool, error: str | None)
+    """
+    if not is_configured():
+        return (False, "DB 미설정")
+    try:
+        _ensure_initialized()
+        save_property(
+            property_number=property_number,
+            filename=filename,
+            drive_file_id=drive_file_id,
+            data=data or {},
+            source=source,
+        )
+        return (True, None)
+    except Exception as e:
+        return (False, str(e))
+
+
+def save_extracted_batch(items: list) -> tuple:
+    """
+    추출 결과 여러 건을 한 번에 안전 저장.
+    items: [{"property_number","filename","drive_file_id","data","source"}, ...]
+    Returns: (saved: int, failed: int)  — 절대 예외 안 던짐
+    """
+    if not is_configured():
+        return (0, 0)
+    saved = failed = 0
+    for it in items:
+        ok, _ = save_extracted(
+            property_number=it.get("property_number", ""),
+            filename=it.get("filename", ""),
+            drive_file_id=it.get("drive_file_id"),
+            data=it.get("data") or {},
+            source=it.get("source", ""),
+        )
+        if ok:
+            saved += 1
+        else:
+            failed += 1
+    return (saved, failed)
 
 
 # ── 단독 실행 시 자가 테스트 ─────────────────────────────
