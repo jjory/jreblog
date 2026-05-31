@@ -343,28 +343,27 @@ def _visa_text(filename: str) -> str:
     return ""
 
 
-def _deposit_parts(field):
-    """{value,unit} → (값(float), 단위라벨). 없으면 (0.0, '모름')."""
-    if isinstance(field, dict) and field.get("unit"):
-        unit = {"months": "개월분", "yen": "엔"}.get(field.get("unit"), "모름")
+def _deposit_months(field) -> float:
+    """{value,unit} → 개월분 숫자. months면 그 값, 그 외(엔/없음)는 0.0."""
+    if isinstance(field, dict) and field.get("unit") == "months":
         try:
-            return (float(field.get("value") or 0), unit)
+            return float(field.get("value") or 0)
         except (ValueError, TypeError):
-            return (0.0, "모름")
-    return (0.0, "모름")
+            return 0.0
+    return 0.0
 
 
-# 표 칼럼 순서 (캡처 기준) — 편집 가능 칸: 사진링크/시키킹값/시키킹단위/레이킹값/레이킹단위
+# 표 칼럼 순서 (캡처 기준) — 편집 가능 칸: 사진링크/시키킹/레이킹(개월분, 숫자만)
 _FULL_COLS = [
     "매물번호", "건물명", "주소", "지역", "맵", "매물검색", "사진링크",
-    "월세", "관리비", "월세+관리비", "시키킹값", "시키킹단위", "레이킹값", "레이킹단위", "방향",
+    "월세", "관리비", "월세+관리비", "시키킹", "레이킹", "방향",
     "노선1", "가까운역1", "도보1", "노선2", "가까운역2", "도보2", "신주쿠까지",
     "간취", "면적", "구조", "건물층수", "입주층", "건축연도", "입주일",
     "인터넷", "엘리베이터", "택배박스", "오토록", "에어컨", "화장실욕실분리",
-    "실내세탁", "독립세면대", "도시가스", "IH", "가스종류", "24시간쓰레기", "펫", "피아노",
+    "실내세탁", "독립세면대", "도시가스", "IH", "가스종류", "24시간쓰레기",
     "비자", "관리회사",
 ]
-_EDITABLE_COLS = ["사진링크", "시키킹값", "시키킹단위", "레이킹값", "레이킹단위"]
+_EDITABLE_COLS = ["사진링크", "시키킹", "레이킹"]
 
 
 def _property_to_full_row(p: dict) -> dict:
@@ -386,8 +385,8 @@ def _property_to_full_row(p: dict) -> dict:
     except (ValueError, TypeError):
         total = None
 
-    shiki_v, shiki_u = _deposit_parts(_effective_deposit(p, "shikikin"))
-    reiki_v, reiki_u = _deposit_parts(_effective_deposit(p, "reikin"))
+    shiki_m = _deposit_months(_effective_deposit(p, "shikikin"))
+    reiki_m = _deposit_months(_effective_deposit(p, "reikin"))
 
     station_jp = ns.get("station") or ""
     map_q = _urlparse.quote(f"{bldg} {data.get('address') or ''}".strip())
@@ -407,10 +406,8 @@ def _property_to_full_row(p: dict) -> dict:
         "월세": _fmt_money(rent),
         "관리비": _fmt_money(mgmt),
         "월세+관리비": _fmt_money(total),
-        "시키킹값": shiki_v,
-        "시키킹단위": shiki_u,
-        "레이킹값": reiki_v,
-        "레이킹단위": reiki_u,
+        "시키킹": shiki_m,
+        "레이킹": reiki_m,
         "방향": _direction_ko(data.get("facing_direction") or ""),
         "노선1": _line_ko(ns.get("line") or ""),
         "가까운역1": _station_ko(station_jp),
@@ -438,8 +435,6 @@ def _property_to_full_row(p: dict) -> dict:
         "IH": _yn(None),  # IH 여부는 스키마에 직접 없음 → 공란(필요시 추후)
         "가스종류": gas_ko,
         "24시간쓰레기": "",  # 스키마에 직접 없음 → other_facilities 참고(추후)
-        "펫": _yn(cond.get("pets_ok")),
-        "피아노": _yn(cond.get("instruments_ok")),
         "비자": _visa_text(p.get("filename") or ""),
         "관리회사": data.get("management_company") or "",
     }
@@ -3140,10 +3135,8 @@ with tab6:
                 "맵": st.column_config.LinkColumn("맵", display_text="집위치보기"),
                 "매물검색": st.column_config.LinkColumn("매물검색", display_text="검색결과"),
                 "사진링크": st.column_config.TextColumn("사진링크✏️", help="중개사이트 매물 링크 붙여넣기"),
-                "시키킹값": st.column_config.NumberColumn("시키킹값✏️", min_value=0.0, step=0.5),
-                "시키킹단위": st.column_config.SelectboxColumn("시키킹단위✏️", options=["개월분", "엔", "모름"]),
-                "레이킹값": st.column_config.NumberColumn("레이킹값✏️", min_value=0.0, step=0.5),
-                "레이킹단위": st.column_config.SelectboxColumn("레이킹단위✏️", options=["개월분", "엔", "모름"]),
+                "시키킹": st.column_config.NumberColumn("시키킹✏️(개월분)", min_value=0.0, step=0.5, help="개월수 입력 (예: 1.0). 0이면 없음"),
+                "레이킹": st.column_config.NumberColumn("레이킹✏️(개월분)", min_value=0.0, step=0.5, help="개월수 입력 (예: 1.0). 0이면 없음"),
             }
 
             st.caption("✏️ 표시된 칸(사진링크·시키킹·레이킹)만 편집 가능합니다. 칼럼 머리글을 클릭하면 정렬됩니다.")
@@ -3162,8 +3155,24 @@ with tab6:
                 for _i in range(len(_id_list)):
                     _rid = _id_list[_i]
                     _now = {k: _edited.iloc[_i][k] for k in _EDITABLE_COLS}
-                    if _now == _orig_edit[_i]:
+
+                    # 변경 감지 (사진=문자열 비교, 시키킹·레이킹=숫자 비교)
+                    _changed = False
+                    for _k in _EDITABLE_COLS:
+                        _a, _b = _now.get(_k), _orig_edit[_i].get(_k)
+                        if _k == "사진링크":
+                            if str(_a or "").strip() != str(_b or "").strip():
+                                _changed = True
+                        else:
+                            try:
+                                if abs(float(_a or 0) - float(_b or 0)) > 1e-9:
+                                    _changed = True
+                            except (ValueError, TypeError):
+                                if _a != _b:
+                                    _changed = True
+                    if not _changed:
                         continue  # 변경 없는 행은 건너뜀
+
                     # 변경된 행 → manual_fields 병합 저장
                     try:
                         _cur = property_db.get_property(_rid) or {}
@@ -3175,17 +3184,17 @@ with tab6:
                         else:
                             _manual.pop("photo_link", None)
 
-                        def _mk_dep(val, unit_label):
-                            if unit_label == "모름":
-                                return None
+                        def _mk_dep(months):
                             try:
-                                v = float(val)
+                                v = float(months)
                             except (ValueError, TypeError):
                                 return None
-                            return {"value": v, "unit": "months" if unit_label == "개월분" else "yen"}
+                            if v <= 0:
+                                return None  # 0이면 없음(override 제거)
+                            return {"value": v, "unit": "months"}
 
-                        _sd = _mk_dep(_now.get("시키킹값"), _now.get("시키킹단위"))
-                        _rd = _mk_dep(_now.get("레이킹값"), _now.get("레이킹단위"))
+                        _sd = _mk_dep(_now.get("시키킹"))
+                        _rd = _mk_dep(_now.get("레이킹"))
                         if _sd is not None:
                             _manual["shikikin"] = _sd
                         else:
