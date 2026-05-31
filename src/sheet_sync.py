@@ -101,15 +101,16 @@ def _parse_sheet_values(values: list) -> dict:
             "lines":    {"日本語": "한글", ...},
             "stations": {"日本語": "한글", ...},
             "wards":    {"日本語": "한글", ...},
+            "station_times": {"駅名(일/한 둘 다 키)": "신주쿠까지N분,환승N회", ...},
         }
     """
-    result = {"lines": {}, "stations": {}, "wards": {}}
+    result = {"lines": {}, "stations": {}, "wards": {}, "station_times": {}}
     if not values:
         return result
 
     # 헤더 행 + 1행 (영어/한글 헤더) 스킵
     for row in values[2:]:  # 인덱스 2부터 데이터 시작 (시트 첫 2행은 헤더)
-        # 컬럼 인덱스: 1(노선일), 3(노선한), 5(역일), 7(역한), 10(지명일), 12(지명한)
+        # 컬럼 인덱스: 1(노선일), 3(노선한), 5(역일), 7(역한), 8(소요시간), 10(지명일), 12(지명한)
         # 안전 추출 (행이 짧을 수 있음)
         def cell(idx):
             return (row[idx].strip() if idx < len(row) and row[idx] else "")
@@ -125,6 +126,15 @@ def _parse_sheet_values(values: list) -> dict:
         station_ko = cell(7)
         if station_jp and station_ko and not _has_only_ascii_or_korean(station_jp):
             result["stations"][station_jp] = station_ko
+
+        # ⭐ 신주쿠 소요시간·환승: 컬럼 8(I열) — 역명(일/한)을 키로 매핑
+        #    예: "신주쿠까지31분,환승0회"  (값이 있을 때만)
+        station_time = cell(8)
+        if station_time:
+            if station_jp:
+                result["station_times"][station_jp] = station_time
+            if station_ko:
+                result["station_times"][station_ko] = station_time
 
         # 지명: 컬럼 10(일) → 컬럼 12(한)
         ward_jp = cell(10)
@@ -194,6 +204,30 @@ def load_translation_from_sheet() -> Optional[dict]:
         return None
 
 
+def get_station_time(station: str) -> str:
+    """
+    역명(일본어 또는 한글)으로 '신주쿠까지 소요시간·환승' 문자열을 조회.
+    예: get_station_time("下井草") 또는 get_station_time("시모이구사")
+        → "신주쿠까지21분,환승0회"
+    매칭 없으면 "" (제안표에선 공란 처리).
+    시트 미설정/실패 시에도 "" 반환 (예외 안 던짐).
+    """
+    if not station:
+        return ""
+    data = load_translation_from_sheet()
+    if not data:
+        return ""
+    times = data.get("station_times", {})
+    s = station.strip()
+    # 정확 일치 우선
+    if s in times:
+        return times[s]
+    # 역명에 '역'이 붙어 오는 경우 제거 후 재시도 (예: '시모이구사역')
+    if s.endswith("역") and s[:-1] in times:
+        return times[s[:-1]]
+    return ""
+
+
 def invalidate_cache() -> None:
     """캐시 강제 무효화 (관리자가 즉시 시트 반영 원할 때)."""
     global _cache_data, _cache_timestamp
@@ -211,6 +245,7 @@ def get_cache_status() -> dict:
             "lines": len(_cache_data.get("lines", {})) if cached else 0,
             "stations": len(_cache_data.get("stations", {})) if cached else 0,
             "wards": len(_cache_data.get("wards", {})) if cached else 0,
+            "station_times": len(_cache_data.get("station_times", {})) if cached else 0,
         }
     return {
         "configured": _is_sheet_configured(),
