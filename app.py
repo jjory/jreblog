@@ -208,6 +208,31 @@ def _render_property_card(p: dict) -> None:
             st.markdown(f"**사진링크**  \n{photo}")
 
 
+def _property_to_row(p: dict) -> dict:
+    """物件DB 매물 1건 → 표(테이블) 한 행 dict. 한 줄에 모든 정보."""
+    data = p.get("data") or {}
+    manual = p.get("manual_fields") or {}
+    st_obj = data.get("nearest_station") or {}
+    station = st_obj.get("station") or ""
+    walk = st_obj.get("walk_minutes")
+    area = data.get("area_sqm")
+    return {
+        "매물번호": p.get("property_number") or "",
+        "건물명": data.get("property_name") or "",
+        "주소": data.get("address") or "",
+        "월세": _fmt_money(data.get("rent_yen")),
+        "관리비": _fmt_money(data.get("management_fee_yen")),
+        "시키킹": _fmt_deposit_display(data.get("shikikin")),
+        "레이킹": _fmt_deposit_display(data.get("reikin")),
+        "구조": data.get("layout") or "",
+        "면적": f"{area}㎡" if area else "",
+        "가까운역": station,
+        "도보": f"도보{walk}분" if walk else "",
+        "신주쿠": _fmt_station_time(station) or "",
+        "사진링크": "입력됨" if manual.get("photo_link") else "미입력",
+    }
+
+
 def _insert_property_number_to_table(html: str, prop_num: str) -> str:
     """본문 '매물 기본정보' 표 맨 위에 매물번호 행을 삽입.
     첫 번째 <table>의 첫 <tr> 앞에 매물번호 행 추가.
@@ -2755,7 +2780,7 @@ with tab5:
         _render_staff_stats()
 
 
-# ───── Tab 6: 🏠 物件DB · 제안 리스트 (4-1: 목록 보기) ─────
+# ───── Tab 6: 🏠 物件DB · 제안 리스트 (4-1: 표 형식 목록) ─────
 with tab6:
     st.markdown("### 🏠 物件DB · 제안 리스트")
     st.caption("추출된 매물이 매물번호 최신순으로 모입니다. (검토·수정·선택은 다음 단계에서 추가)")
@@ -2766,21 +2791,59 @@ with tab6:
             "환경변수 DATABASE_URL을 확인해 주세요."
         )
     else:
+        # 상단 줄: 새로고침(왼쪽) + 검색칸(오른쪽)
+        _top_l, _top_r = st.columns([1, 3])
+        with _top_l:
+            if st.button("🔄 새로고침", key="propdb_refresh", use_container_width=True):
+                st.rerun()
+        with _top_r:
+            _q = st.text_input(
+                "검색",
+                key="propdb_search",
+                placeholder="🔍 건물명·주소·매물번호·역 검색",
+                label_visibility="collapsed",
+            )
+
         _props = []
         try:
             _props = property_db.list_properties(limit=500)
         except Exception as e:
             st.error(f"매물 목록을 불러오지 못했습니다: {e}")
 
-        cols_top = st.columns([3, 1])
-        with cols_top[0]:
-            st.caption(f"총 매물 {len(_props)}건 · 매물번호 최신순")
-        with cols_top[1]:
-            if st.button("🔄 새로고침", key="propdb_refresh", use_container_width=True):
-                st.rerun()
+        # 검색 필터 (건물명·주소·매물번호·역, 대소문자 무시)
+        if _q and _q.strip():
+            _ql = _q.strip().lower()
+
+            def _match(p):
+                d = p.get("data") or {}
+                stn = (d.get("nearest_station") or {}).get("station") or ""
+                hay = " ".join([
+                    str(p.get("property_number") or ""),
+                    str(d.get("property_name") or ""),
+                    str(d.get("address") or ""),
+                    str(stn),
+                ]).lower()
+                return _ql in hay
+
+            _props = [p for p in _props if _match(p)]
+
+        st.caption(
+            f"총 매물 {len(_props)}건"
+            + (f" · 검색: '{_q.strip()}'" if (_q and _q.strip()) else " · 매물번호 최신순")
+        )
 
         if not _props:
-            st.info("아직 저장된 매물이 없습니다. 도면을 추출하면 여기에 모입니다.")
+            st.info("표시할 매물이 없습니다. (검색어를 지우거나 도면을 추출해 보세요)")
         else:
-            for _p in _props:
-                _render_property_card(_p)
+            import pandas as pd
+
+            _rows = [_property_to_row(_p) for _p in _props]
+            _df = pd.DataFrame(
+                _rows,
+                columns=[
+                    "매물번호", "건물명", "주소", "월세", "관리비",
+                    "시키킹", "레이킹", "구조", "면적",
+                    "가까운역", "도보", "신주쿠", "사진링크",
+                ],
+            )
+            st.dataframe(_df, use_container_width=True, hide_index=True)
