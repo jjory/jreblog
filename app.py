@@ -3096,9 +3096,30 @@ with tab6:
                 label_visibility="collapsed",
             )
 
+        # 관리 줄: 모집종료 포함 보기 + 2주 지난 매물 정리
+        _mng_l, _mng_r = st.columns([1, 1])
+        with _mng_l:
+            _show_closed = st.checkbox("모집종료 포함 보기", key="propdb_show_closed")
+        with _mng_r:
+            if st.button("🧹 2주 지난 매물 정리", key="propdb_cleanup", use_container_width=True):
+                if st.session_state.get("_propdb_confirm_cleanup"):
+                    try:
+                        _n = property_db.delete_old(14)
+                        st.session_state.pop("_propdb_confirm_cleanup", None)
+                        st.success(f"2주 지난 매물 {_n}건을 정리했습니다.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"정리 실패: {e}")
+                else:
+                    st.session_state["_propdb_confirm_cleanup"] = True
+                    st.warning("⚠️ 한 번 더 누르면 2주 지난 매물이 영구 삭제됩니다.")
+
         _props = []
         try:
-            _props = property_db.list_properties(limit=500)
+            _props = property_db.list_properties(
+                include_closed=bool(st.session_state.get("propdb_show_closed")),
+                limit=500,
+            )
         except Exception as e:
             st.error(f"매물 목록을 불러오지 못했습니다: {e}")
 
@@ -3137,8 +3158,10 @@ with tab6:
                 _orig_rows.append(dict(_row))
 
             _df = pd.DataFrame(_rows, columns=_FULL_COLS)
+            _df.insert(0, "선택", False)  # 맨 앞 체크박스 칼럼
 
             _colcfg = {
+                "선택": st.column_config.CheckboxColumn("선택", help="블로그·제안·모집종료에 쓸 매물 체크"),
                 "맵": st.column_config.LinkColumn("맵", display_text="집위치보기"),
                 "매물검색": st.column_config.LinkColumn("매물검색", display_text="검색결과"),
                 "사진링크": st.column_config.TextColumn("사진링크", help="중개사이트 매물 링크 붙여넣기"),
@@ -3234,3 +3257,45 @@ with tab6:
                     st.error(f"{_failed}건 저장 실패")
                 else:
                     st.info("변경된 내용이 없습니다.")
+
+            # ── 선택 매물 액션 (4-3a) ──
+            st.divider()
+            _sel_idx = [i for i in range(len(_id_list)) if bool(_edited.iloc[i]["선택"])]
+            _sel_ids = [_id_list[i] for i in _sel_idx]
+            st.markdown(f"#### ✅ 선택한 매물: {len(_sel_idx)}건")
+
+            _a1, _a2, _a3 = st.columns(3)
+            with _a1:
+                if st.button("📋 선택 매물 모아보기", key="propdb_collect", use_container_width=True,
+                             disabled=(len(_sel_idx) == 0)):
+                    st.session_state["_propdb_show_selected"] = True
+            with _a2:
+                if st.button("🚫 모집종료 처리", key="propdb_close", use_container_width=True,
+                             disabled=(len(_sel_idx) == 0)):
+                    _c, _e = 0, 0
+                    for _rid in _sel_ids:
+                        try:
+                            property_db.mark_closed(_rid, True)
+                            _c += 1
+                        except Exception:
+                            _e += 1
+                    if _c:
+                        st.success(f"{_c}건 모집종료 처리했습니다." + (f" ({_e}건 실패)" if _e else ""))
+                        st.rerun()
+                    elif _e:
+                        st.error(f"{_e}건 처리 실패")
+            with _a3:
+                st.button("📝 블로그/제안 만들기 (다음 단계)", key="propdb_make",
+                          use_container_width=True, disabled=True,
+                          help="블로그 생성·손님용 제안 링크는 다음 단계에서 연결됩니다.")
+
+            # 선택 매물 모아보기 (제안 리스트 기초 — 핵심 칼럼만)
+            if st.session_state.get("_propdb_show_selected") and _sel_idx:
+                st.markdown("##### 선택한 매물 모아보기")
+                _brief_cols = [
+                    "매물번호", "건물명", "지역", "월세", "관리비", "시키킹", "레이킹",
+                    "노선1", "가까운역1", "도보1", "신주쿠까지", "간취", "면적", "입주일", "비자",
+                ]
+                _brief = _edited.iloc[_sel_idx][[c for c in _brief_cols if c in _edited.columns]]
+                st.dataframe(_brief, use_container_width=True, hide_index=True)
+                st.caption("※ 손님용 제안 카드·링크는 5단계에서 만듭니다. 지금은 선택 내용 확인용입니다.")
