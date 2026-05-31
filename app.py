@@ -353,17 +353,19 @@ def _deposit_months(field) -> float:
     return 0.0
 
 
-# 표 칼럼 순서 (캡처 기준) — 편집 가능 칸: 사진링크/시키킹/레이킹(개월분, 숫자만)
+# 표 칼럼 순서 — 매물번호·입주일·비자를 앞으로, 도시가스 삭제. 전체 편집 가능.
 _FULL_COLS = [
-    "매물번호", "건물명", "주소", "지역", "맵", "매물검색", "사진링크",
+    "매물번호", "입주일", "비자",
+    "건물명", "주소", "지역", "맵", "매물검색", "사진링크",
     "월세", "관리비", "월세+관리비", "시키킹", "레이킹", "방향",
     "노선1", "가까운역1", "도보1", "노선2", "가까운역2", "도보2", "신주쿠까지",
-    "간취", "면적", "구조", "건물층수", "입주층", "건축연도", "입주일",
+    "간취", "면적", "구조", "건물층수", "입주층", "건축연도",
     "인터넷", "엘리베이터", "택배박스", "오토록", "에어컨", "화장실욕실분리",
-    "실내세탁", "독립세면대", "도시가스", "IH", "가스종류", "24시간쓰레기",
-    "비자", "관리회사",
+    "실내세탁", "독립세면대", "IH", "가스종류", "24시간쓰레기",
+    "관리회사",
 ]
-_EDITABLE_COLS = ["사진링크", "시키킹", "레이킹"]
+# 시키킹·레이킹=구조화 저장, 사진링크=photo_link, 그 외=overrides(텍스트)
+_DEPOSIT_COLS = ["시키킹", "레이킹"]
 
 
 def _property_to_full_row(p: dict) -> dict:
@@ -395,7 +397,7 @@ def _property_to_full_row(p: dict) -> dict:
     gas_jp = fac.get("gas_type") or ""
     gas_ko = {"都市ガス": "도시가스", "プロパン": "프로판가스", "プロパンガス": "프로판가스"}.get(gas_jp, gas_jp or "")
 
-    return {
+    row = {
         "매물번호": p.get("property_number") or "",
         "건물명": bldg,
         "주소": addr_jp,
@@ -431,13 +433,19 @@ def _property_to_full_row(p: dict) -> dict:
         "화장실욕실분리": ("분리형" if fac.get("separate_bath_toilet") is True else _yn(fac.get("separate_bath_toilet"))),
         "실내세탁": ("실내" if fac.get("washing_machine_indoor") is True else _yn(fac.get("washing_machine_indoor"))),
         "독립세면대": _yn(fac.get("independent_washstand") if "independent_washstand" in fac else fac.get("separate_washstand")),
-        "도시가스": ("도시가스" if gas_jp == "都市ガス" else ""),
-        "IH": _yn(None),  # IH 여부는 스키마에 직접 없음 → 공란(필요시 추후)
+        "IH": _yn(None),  # 스키마에 직접 없음 → 공란(수동 입력으로 채움)
         "가스종류": gas_ko,
-        "24시간쓰레기": "",  # 스키마에 직접 없음 → other_facilities 참고(추후)
+        "24시간쓰레기": "",  # 스키마에 직접 없음 → 수동 입력으로 채움
         "비자": _visa_text(p.get("filename") or ""),
         "관리회사": data.get("management_company") or "",
     }
+
+    # 수동 수정값(overrides) 덮어쓰기 — 시키킹·레이킹·사진링크는 별도 저장이라 제외
+    ov = manual.get("overrides") or {}
+    for _k, _v in ov.items():
+        if _k in row and _k not in ("시키킹", "레이킹", "사진링크"):
+            row[_k] = _v
+    return row
 
 
 def _deposit_edit_widget(label: str, current, key: str, col):
@@ -3120,89 +3128,99 @@ with tab6:
         if not _props:
             st.info("표시할 매물이 없습니다. (검색어를 지우거나 도면을 추출해 보세요)")
         else:
-            # 행 구성 + 매물 id 매핑(저장용) + 편집칸 원본값 보관(변경 감지용)
-            _rows, _id_list, _orig_edit = [], [], []
+            # 행 구성 + 매물 id 매핑(저장용) + 원본 행 전체 보관(변경 감지용)
+            _rows, _id_list, _orig_rows = [], [], []
             for _p in _props:
                 _row = _property_to_full_row(_p)
                 _rows.append(_row)
                 _id_list.append(_p.get("id"))
-                _orig_edit.append({k: _row[k] for k in _EDITABLE_COLS})
+                _orig_rows.append(dict(_row))
 
             _df = pd.DataFrame(_rows, columns=_FULL_COLS)
 
-            _readonly = [c for c in _FULL_COLS if c not in _EDITABLE_COLS]
             _colcfg = {
                 "맵": st.column_config.LinkColumn("맵", display_text="집위치보기"),
                 "매물검색": st.column_config.LinkColumn("매물검색", display_text="검색결과"),
-                "사진링크": st.column_config.TextColumn("사진링크✏️", help="중개사이트 매물 링크 붙여넣기"),
-                "시키킹": st.column_config.NumberColumn("시키킹✏️(개월분)", min_value=0.0, step=0.5, help="개월수 입력 (예: 1.0). 0이면 없음"),
-                "레이킹": st.column_config.NumberColumn("레이킹✏️(개월분)", min_value=0.0, step=0.5, help="개월수 입력 (예: 1.0). 0이면 없음"),
+                "사진링크": st.column_config.TextColumn("사진링크", help="중개사이트 매물 링크 붙여넣기"),
+                "시키킹": st.column_config.NumberColumn("시키킹(개월분)", min_value=0.0, step=0.5, help="개월수 입력 (예: 1.0). 0이면 없음"),
+                "레이킹": st.column_config.NumberColumn("레이킹(개월분)", min_value=0.0, step=0.5, help="개월수 입력 (예: 1.0). 0이면 없음"),
             }
 
-            st.caption("✏️ 표시된 칸(사진링크·시키킹·레이킹)만 편집 가능합니다. 칼럼 머리글을 클릭하면 정렬됩니다.")
+            st.caption("모든 칸을 직접 편집할 수 있습니다. 빈칸도 입력 가능. 칼럼 머리글 클릭=정렬. 수정 후 아래 저장 버튼을 누르세요.")
             _edited = st.data_editor(
                 _df,
                 key="propdb_editor",
                 use_container_width=True,
                 hide_index=True,
-                disabled=_readonly,
                 column_config=_colcfg,
                 height=420,
             )
 
             if st.button("💾 변경사항 저장", key="propdb_save_all", type="primary"):
                 _saved, _failed = 0, 0
+
+                def _mk_dep(months):
+                    try:
+                        v = float(months)
+                    except (ValueError, TypeError):
+                        return None
+                    return {"value": v, "unit": "months"} if v > 0 else None
+
                 for _i in range(len(_id_list)):
                     _rid = _id_list[_i]
-                    _now = {k: _edited.iloc[_i][k] for k in _EDITABLE_COLS}
+                    _orig = _orig_rows[_i]
 
-                    # 변경 감지 (사진=문자열 비교, 시키킹·레이킹=숫자 비교)
-                    _changed = False
-                    for _k in _EDITABLE_COLS:
-                        _a, _b = _now.get(_k), _orig_edit[_i].get(_k)
-                        if _k == "사진링크":
-                            if str(_a or "").strip() != str(_b or "").strip():
-                                _changed = True
-                        else:
+                    # 변경된 칼럼 수집
+                    _diff = {}
+                    for _col in _FULL_COLS:
+                        _a = _edited.iloc[_i][_col]
+                        _b = _orig.get(_col)
+                        if _col in _DEPOSIT_COLS:
                             try:
                                 if abs(float(_a or 0) - float(_b or 0)) > 1e-9:
-                                    _changed = True
+                                    _diff[_col] = _a
                             except (ValueError, TypeError):
                                 if _a != _b:
-                                    _changed = True
-                    if not _changed:
-                        continue  # 변경 없는 행은 건너뜀
+                                    _diff[_col] = _a
+                        else:
+                            if str(_a if _a is not None else "").strip() != str(_b if _b is not None else "").strip():
+                                _diff[_col] = _a
+                    if not _diff:
+                        continue
 
-                    # 변경된 행 → manual_fields 병합 저장
                     try:
                         _cur = property_db.get_property(_rid) or {}
                         _manual = dict(_cur.get("manual_fields") or {})
+                        _ov = dict(_manual.get("overrides") or {})
 
-                        _photo = str(_now.get("사진링크") or "").strip()
-                        if _photo:
-                            _manual["photo_link"] = _photo
-                        else:
-                            _manual.pop("photo_link", None)
+                        for _col, _val in _diff.items():
+                            if _col == "사진링크":
+                                _s = str(_val or "").strip()
+                                if _s:
+                                    _manual["photo_link"] = _s
+                                else:
+                                    _manual.pop("photo_link", None)
+                            elif _col == "시키킹":
+                                _d = _mk_dep(_val)
+                                _manual["shikikin"] = _d if _d else None
+                                if _d is None:
+                                    _manual.pop("shikikin", None)
+                            elif _col == "레이킹":
+                                _d = _mk_dep(_val)
+                                _manual["reikin"] = _d if _d else None
+                                if _d is None:
+                                    _manual.pop("reikin", None)
+                            else:
+                                _s = str(_val if _val is not None else "").strip()
+                                if _s:
+                                    _ov[_col] = _s
+                                else:
+                                    _ov.pop(_col, None)
 
-                        def _mk_dep(months):
-                            try:
-                                v = float(months)
-                            except (ValueError, TypeError):
-                                return None
-                            if v <= 0:
-                                return None  # 0이면 없음(override 제거)
-                            return {"value": v, "unit": "months"}
-
-                        _sd = _mk_dep(_now.get("시키킹"))
-                        _rd = _mk_dep(_now.get("레이킹"))
-                        if _sd is not None:
-                            _manual["shikikin"] = _sd
+                        if _ov:
+                            _manual["overrides"] = _ov
                         else:
-                            _manual.pop("shikikin", None)
-                        if _rd is not None:
-                            _manual["reikin"] = _rd
-                        else:
-                            _manual.pop("reikin", None)
+                            _manual.pop("overrides", None)
 
                         property_db.update_manual_fields(_rid, _manual)
                         _saved += 1
