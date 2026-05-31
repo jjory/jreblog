@@ -45,6 +45,7 @@ EXTRACTION_PROMPT = """\
   * 「120,000円」「8万円」など金額表記 → {"value": 120000, "unit": "yen"}
   * 「敷/礼 1/1」のような略記 → 敷=1, 礼=1 (months)
   * どうしても判読できない場合のみ → {"value": null, "unit": null}
+- 管理会社(management_company): 図面の下部・隅に記載された管理会社名を読み取る。なければ null。
 - extraction_confidence は読み取り精度を厳密に評価:
   * high: 主要項目(駅・賃料・間取り・面積)がすべて明確に読み取れた
   * medium: 一部の項目が不鮮明だが、主要項目は読み取れた
@@ -100,6 +101,7 @@ EXTRACTION_PROMPT = """\
     "contract_period_years": 契約期間
   },
   "available_from": "入居可能日",
+  "management_company": "管理会社名 (図面下部に記載されている場合のみ。なければ null)",
   "agency_notes": "備考・特筆事項 (原文ママ)",
   "extraction_confidence": "high/medium/low"
 }
