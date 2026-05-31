@@ -37,6 +37,11 @@ EXTRACTION_PROMPT = """\
 - 「○○駅 徒歩○分」は最寄駅と分数を別フィールドに分離
 - 設備アイコンも全て読み取ること (エアコン・バルコニー・洗濯機置場 等)
 - 間取り表記 (1R, 1K, 1DK, 1LDK, 2K, 2LDK 等) は半角で
+- 敷金(shikikin)・礼金(reikin) はマイソクの表記をそのまま読み取る:
+  * 「1ヶ月」「1.0ヶ月分」のような月数表記 → {"value": 1.0, "unit": "months"}
+  * 「120,000円」のような金額表記 → {"value": 120000, "unit": "yen"}
+  * 「なし」「0」「ゼロ」 → {"value": 0, "unit": "months"}
+  * 読み取れない場合 → {"value": null, "unit": null}（憶測しない）
 - extraction_confidence は読み取り精度を厳密に評価:
   * high: 主要項目(駅・賃料・間取り・面積)がすべて明確に読み取れた
   * medium: 一部の項目が不鮮明だが、主要項目は読み取れた
@@ -56,6 +61,8 @@ EXTRACTION_PROMPT = """\
   ],
   "rent_yen": 月額賃料(円, 整数),
   "management_fee_yen": 管理費・共益費(円),
+  "shikikin": {"value": 数値 or null, "unit": "months / yen / null"},
+  "reikin": {"value": 数値 or null, "unit": "months / yen / null"},
   "layout": "間取り (例: 1LDK)",
   "area_sqm": 専有面積(m², 数値),
   "building_age_years": 築年数(数値),
