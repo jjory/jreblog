@@ -3161,7 +3161,7 @@ with tab6:
             _df.insert(0, "선택", False)  # 맨 앞 체크박스 칼럼
 
             _colcfg = {
-                "선택": st.column_config.CheckboxColumn("선택", help="블로그·제안·모집종료에 쓸 매물 체크"),
+                "선택": st.column_config.CheckboxColumn("✓", width="small", help="블로그·제안·모집종료에 쓸 매물 체크"),
                 "맵": st.column_config.LinkColumn("맵", display_text="집위치보기"),
                 "매물검색": st.column_config.LinkColumn("매물검색", display_text="검색결과"),
                 "사진링크": st.column_config.TextColumn("사진링크", help="중개사이트 매물 링크 붙여넣기"),
@@ -3169,7 +3169,10 @@ with tab6:
                 "레이킹": st.column_config.NumberColumn("레이킹(개월분)", min_value=0.0, step=0.5, help="개월수 입력 (예: 1.0). 0이면 없음"),
             }
 
-            st.caption("모든 칸을 직접 편집할 수 있습니다. 빈칸도 입력 가능. 칼럼 머리글 클릭=정렬. 수정 후 아래 저장 버튼을 누르세요.")
+            # 상단 액션 바 자리 (표 렌더 후 채움 → 버튼이 표 위에 표시됨)
+            _action_bar = st.container()
+
+            st.caption("모든 칸을 직접 편집할 수 있습니다. 빈칸도 입력 가능. 칼럼 머리글 클릭=정렬. 수정 후 아래 [변경사항 저장]을 누르세요.")
             _edited = st.data_editor(
                 _df,
                 key="propdb_editor",
@@ -3178,6 +3181,37 @@ with tab6:
                 column_config=_colcfg,
                 height=420,
             )
+
+            # 선택 계산 + 상단 액션 바 채우기 (버튼을 표 위로)
+            _sel_idx = [i for i in range(len(_id_list)) if bool(_edited.iloc[i]["선택"])]
+            _sel_ids = [_id_list[i] for i in _sel_idx]
+            with _action_bar:
+                _bc, _b1, _b2, _b3 = st.columns([2, 1, 1, 1.4])
+                with _bc:
+                    st.markdown(f"**✅ 선택한 매물: {len(_sel_idx)}건**")
+                with _b1:
+                    if st.button("📋 모아보기", key="propdb_collect", use_container_width=True,
+                                 disabled=(len(_sel_idx) == 0)):
+                        st.session_state["_propdb_show_selected"] = True
+                with _b2:
+                    if st.button("🚫 모집종료", key="propdb_close", use_container_width=True,
+                                 disabled=(len(_sel_idx) == 0)):
+                        _c, _e = 0, 0
+                        for _rid in _sel_ids:
+                            try:
+                                property_db.mark_closed(_rid, True)
+                                _c += 1
+                            except Exception:
+                                _e += 1
+                        if _c:
+                            st.success(f"{_c}건 모집종료 처리했습니다." + (f" ({_e}건 실패)" if _e else ""))
+                            st.rerun()
+                        elif _e:
+                            st.error(f"{_e}건 처리 실패")
+                with _b3:
+                    st.button("📝 제안 링크 만들기 (다음 단계)", key="propdb_make",
+                              use_container_width=True, disabled=True,
+                              help="손님용 제안 카드·링크는 5단계에서 연결됩니다.")
 
             if st.button("💾 변경사항 저장", key="propdb_save_all", type="primary"):
                 _saved, _failed = 0, 0
@@ -3258,40 +3292,10 @@ with tab6:
                 else:
                     st.info("변경된 내용이 없습니다.")
 
-            # ── 선택 매물 액션 (4-3a) ──
-            st.divider()
-            _sel_idx = [i for i in range(len(_id_list)) if bool(_edited.iloc[i]["선택"])]
-            _sel_ids = [_id_list[i] for i in _sel_idx]
-            st.markdown(f"#### ✅ 선택한 매물: {len(_sel_idx)}건")
-
-            _a1, _a2, _a3 = st.columns(3)
-            with _a1:
-                if st.button("📋 선택 매물 모아보기", key="propdb_collect", use_container_width=True,
-                             disabled=(len(_sel_idx) == 0)):
-                    st.session_state["_propdb_show_selected"] = True
-            with _a2:
-                if st.button("🚫 모집종료 처리", key="propdb_close", use_container_width=True,
-                             disabled=(len(_sel_idx) == 0)):
-                    _c, _e = 0, 0
-                    for _rid in _sel_ids:
-                        try:
-                            property_db.mark_closed(_rid, True)
-                            _c += 1
-                        except Exception:
-                            _e += 1
-                    if _c:
-                        st.success(f"{_c}건 모집종료 처리했습니다." + (f" ({_e}건 실패)" if _e else ""))
-                        st.rerun()
-                    elif _e:
-                        st.error(f"{_e}건 처리 실패")
-            with _a3:
-                st.button("📝 블로그/제안 만들기 (다음 단계)", key="propdb_make",
-                          use_container_width=True, disabled=True,
-                          help="블로그 생성·손님용 제안 링크는 다음 단계에서 연결됩니다.")
-
-            # 선택 매물 모아보기 (제안 리스트 기초 — 핵심 칼럼만)
+            # 선택 매물 모아보기 결과 (제안 리스트 기초 — 핵심 칼럼만). 버튼은 표 위 상단에 있음.
             if st.session_state.get("_propdb_show_selected") and _sel_idx:
-                st.markdown("##### 선택한 매물 모아보기")
+                st.divider()
+                st.markdown("##### 📋 선택한 매물 모아보기")
                 _brief_cols = [
                     "매물번호", "건물명", "지역", "월세", "관리비", "시키킹", "레이킹",
                     "노선1", "가까운역1", "도보1", "신주쿠까지", "간취", "면적", "입주일", "비자",
