@@ -59,6 +59,12 @@ from src.persistence import (
     HISTORY_RETENTION_DAYS,
 )
 
+# 物件DB(제안용 리스트) — Postgres 저장. 미설정/미설치여도 앱은 정상 동작.
+try:
+    from src import db as property_db
+except Exception:
+    property_db = None
+
 # ─────────────────────────────────────────────────
 # 설정 로드 (로컬 .env / 클라우드 Streamlit Secrets)
 # ─────────────────────────────────────────────────
@@ -1400,6 +1406,25 @@ def _process_drive_files(file_list, current_email, target_visa_arg, model_arg, e
             done += 1
             dl_progress.progress(done / total, text=f"[{done}/{total}] 다운로드·분석")
 
+    # ⭐ 추출 결과를 物件DB(Postgres)에 저장 — 블로그 생성과 무관하게 먼저 저장.
+    #    DB 미설정/실패해도 예외가 안 나므로 블로그 흐름엔 전혀 영향 없음.
+    if property_db is not None:
+        try:
+            _db_items = [
+                {
+                    "property_number": a["file_info"]["property_number"],
+                    "filename": a["file_info"]["file"]["name"],
+                    "drive_file_id": a["file_info"]["file"]["id"],
+                    "data": a["data"],
+                    "source": "drive_auto",
+                }
+                for a in analyzed if a.get("data")
+            ]
+            if _db_items:
+                property_db.save_extracted_batch(_db_items)
+        except Exception:
+            pass  # 物件DB 저장 실패는 블로그 흐름에 영향 주지 않음
+
     # 5. 분석 성공한 매물만 블로그 생성 (병렬)
     gen_progress = st.progress(0.0, text="블로그 생성 대기…")
     valid_for_gen = [a for a in analyzed if a.get("data")]
@@ -1985,6 +2010,23 @@ with tab1:
                 progress.progress(1.0, text="✅ 분석 완료")
                 # 업로드 순서대로 정렬 (인덱스 순)
                 properties = [results_by_idx[i] for i in sorted(results_by_idx.keys())]
+
+                # ⭐ 추출 결과를 物件DB(Postgres)에 저장 (직접 업로드는 drive_file_id 없음)
+                #    DB 미설정/실패해도 예외가 안 나므로 흐름엔 영향 없음.
+                if property_db is not None and properties:
+                    try:
+                        property_db.save_extracted_batch([
+                            {
+                                "property_number": p.get("property_number", ""),
+                                "filename": p.get("filename", ""),
+                                "drive_file_id": None,
+                                "data": p.get("data") or {},
+                                "source": "upload",
+                            }
+                            for p in properties
+                        ])
+                    except Exception:
+                        pass
 
                 if properties:
                     st.session_state["properties"] = properties
