@@ -580,7 +580,7 @@ def _add_section_spacing(html: str) -> str:
     return re.sub(r'(.{0,60})(<h2[^>]*>)', _insert_blank, html, flags=re.DOTALL)
 
 
-
+def _apply_naver_formatting(html: str) -> str:
     """
     네이버 블로그용 최종 포맷팅 (복사 붙여넣기만으로 게재 가능하게).
     - 본문 문단·헤더·리스트에 가운데 정렬 + 폰트 크기를 inline style로 주입
