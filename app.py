@@ -222,8 +222,8 @@ def _property_to_row(p: dict) -> dict:
         "주소": data.get("address") or "",
         "월세": _fmt_money(data.get("rent_yen")),
         "관리비": _fmt_money(data.get("management_fee_yen")),
-        "시키킹": _fmt_deposit_display(data.get("shikikin")),
-        "레이킹": _fmt_deposit_display(data.get("reikin")),
+        "시키킹": _fmt_deposit_display(_effective_deposit(p, "shikikin")),
+        "레이킹": _fmt_deposit_display(_effective_deposit(p, "reikin")),
         "구조": data.get("layout") or "",
         "면적": f"{area}㎡" if area else "",
         "가까운역": station,
@@ -231,6 +231,90 @@ def _property_to_row(p: dict) -> dict:
         "신주쿠": _fmt_station_time(station) or "",
         "사진링크": "입력됨" if manual.get("photo_link") else "미입력",
     }
+
+
+def _effective_deposit(p: dict, key: str):
+    """시키킹/레이킹의 '유효값' — 직원 수정값(manual)이 있으면 그것, 없으면 추출값."""
+    manual = p.get("manual_fields") or {}
+    if isinstance(manual.get(key), dict):
+        return manual[key]
+    return (p.get("data") or {}).get(key)
+
+
+def _deposit_edit_widget(label: str, current, key: str, col):
+    """
+    시키킹/레이킹 수정 위젯. 반환: {"value","unit"} 또는 None(미입력/모름).
+    current: 현재 유효값 {"value","unit"} (없으면 None)
+    """
+    units = ["모름/미입력", "개월분", "엔"]
+    cur_label, cur_val = "모름/미입력", 0.0
+    if isinstance(current, dict) and current.get("unit"):
+        cur_label = {"months": "개월분", "yen": "엔"}.get(current.get("unit"), "모름/미입력")
+        try:
+            cur_val = float(current.get("value") or 0)
+        except (ValueError, TypeError):
+            cur_val = 0.0
+    with col:
+        st.markdown(f"**{label}**")
+        unit_label = st.selectbox(
+            "단위", units, index=units.index(cur_label),
+            key=f"{key}_unit",
+        )
+        val = st.number_input(
+            "값", min_value=0.0, value=cur_val, step=0.5,
+            key=f"{key}_val", help="개월분이면 1.0, 0.5 등 / 엔이면 금액 입력",
+        )
+    if unit_label == "모름/미입력":
+        return None
+    return {"value": val, "unit": "months" if unit_label == "개월분" else "yen"}
+
+
+def _render_property_editor(p: dict) -> None:
+    """物件DB 매물 검토·수정 영역 (4-2: 사진링크 + 시키킹·레이킹 → 저장)."""
+    import urllib.parse
+
+    data = p.get("data") or {}
+    manual = dict(p.get("manual_fields") or {})
+    row_id = p.get("id")
+    bldg = data.get("property_name") or ""
+
+    with st.container(border=True):
+        st.markdown(f"**{p.get('property_number') or ''} · {bldg or '(건물명 없음)'}**")
+
+        # 사진 링크 (수동 입력) + 건물명 구글검색
+        cur_photo = manual.get("photo_link") or ""
+        photo = st.text_input(
+            "사진 링크 (URL 붙여넣기)", value=cur_photo,
+            key=f"photo_{row_id}", placeholder="https://...",
+        )
+        if bldg:
+            _gq = urllib.parse.quote(bldg)
+            st.markdown(f"🔍 [‘{bldg}’ 구글에서 검색](https://www.google.com/search?q={_gq})")
+
+        # 시키킹 / 레이킹 수정
+        c1, c2 = st.columns(2)
+        new_shiki = _deposit_edit_widget("시키킹(敷金)", _effective_deposit(p, "shikikin"), f"shiki_{row_id}", c1)
+        new_reiki = _deposit_edit_widget("레이킹(礼金)", _effective_deposit(p, "reikin"), f"reiki_{row_id}", c2)
+
+        if st.button("💾 저장", key=f"save_{row_id}", type="primary"):
+            if photo.strip():
+                manual["photo_link"] = photo.strip()
+            else:
+                manual.pop("photo_link", None)
+            if new_shiki is not None:
+                manual["shikikin"] = new_shiki
+            else:
+                manual.pop("shikikin", None)
+            if new_reiki is not None:
+                manual["reikin"] = new_reiki
+            else:
+                manual.pop("reikin", None)
+            try:
+                property_db.update_manual_fields(row_id, manual)
+                st.success("저장되었습니다.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"저장 실패: {e}")
 
 
 def _insert_property_number_to_table(html: str, prop_num: str) -> str:
@@ -2847,3 +2931,22 @@ with tab6:
                 ],
             )
             st.dataframe(_df, use_container_width=True, hide_index=True)
+
+            # ── 검토·수정 영역 (4-2) ──
+            st.divider()
+            st.markdown("#### ✏️ 매물 검토·수정")
+            st.caption("매물을 선택해 사진 링크와 시키킹·레이킹을 입력·수정하세요. (저장하면 재추출해도 보존됩니다)")
+
+            _opt_map = {}
+            for _p in _props:
+                _d = _p.get("data") or {}
+                _label = f"{_p.get('property_number') or '?'} · {_d.get('property_name') or '(건물명 없음)'}"
+                _opt_map[_label] = _p
+
+            _sel = st.selectbox(
+                "수정할 매물 선택",
+                ["(선택하세요)"] + list(_opt_map.keys()),
+                key="propdb_edit_sel",
+            )
+            if _sel and _sel != "(선택하세요)":
+                _render_property_editor(_opt_map[_sel])
