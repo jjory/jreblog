@@ -65,6 +65,12 @@ try:
 except Exception:
     property_db = None
 
+# 路線 시트 소요시간 조회 — 미설정/실패여도 앱은 정상 동작.
+try:
+    from src import sheet_sync
+except Exception:
+    sheet_sync = None
+
 # ─────────────────────────────────────────────────
 # 설정 로드 (로컬 .env / 클라우드 Streamlit Secrets)
 # ─────────────────────────────────────────────────
@@ -114,6 +120,92 @@ def _extract_property_number(filename: str) -> str:
     if m:
         return m.group(1)
     return ""
+
+
+# ──────────────────────────────────────────────────────
+# 物件DB 탭 — 표시용 헬퍼 (4-1: 보기 전용)
+# ──────────────────────────────────────────────────────
+def _fmt_money(n) -> str:
+    """숫자 → '134,000엔'. None/빈값이면 '-'."""
+    try:
+        if n is None or n == "":
+            return "-"
+        return f"{int(round(float(n))):,}엔"
+    except (ValueError, TypeError):
+        return str(n)
+
+
+def _fmt_deposit_display(field) -> str:
+    """
+    시키킹/레이킹 {value, unit} → 표시 문자열 (원본값 그대로).
+    - months: '1.0개월분'  / yen: '120,000엔'  / 값없음·판독불가: '확인필요'
+    ※ 금액→개월수 환산(§4)은 제안서 생성 단계에서 적용. 여기선 원본만 표시.
+    """
+    if not isinstance(field, dict):
+        return "확인필요"
+    val, unit = field.get("value"), field.get("unit")
+    if val is None or unit is None:
+        return "확인필요"
+    if unit == "months":
+        try:
+            return f"{float(val):.1f}개월분"
+        except (ValueError, TypeError):
+            return "확인필요"
+    if unit == "yen":
+        return _fmt_money(val)
+    return "확인필요"
+
+
+def _fmt_station_time(station) -> str:
+    """역명(일/한)으로 신주쿠 소요시간 조회. 없거나 실패 시 ''."""
+    if not station or sheet_sync is None:
+        return ""
+    try:
+        return sheet_sync.get_station_time(station) or ""
+    except Exception:
+        return ""
+
+
+def _render_property_card(p: dict) -> None:
+    """物件DB 매물 카드 1장 렌더 (4-1: 보기 전용, 수정·선택 없음)."""
+    data = p.get("data") or {}
+    manual = p.get("manual_fields") or {}
+    station_obj = data.get("nearest_station") or {}
+    station = station_obj.get("station") or ""
+    walk = station_obj.get("walk_minutes")
+
+    with st.container(border=True):
+        prop_num = p.get("property_number") or "-"
+        bldg = data.get("property_name") or "(건물명 없음)"
+        addr = data.get("address") or "-"
+        st.markdown(
+            f"**{bldg}**  \n"
+            f"<span style='color:gray;font-size:0.85em'>{prop_num} · {addr}</span>",
+            unsafe_allow_html=True,
+        )
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown(
+                f"**월세/관리**  \n{_fmt_money(data.get('rent_yen'))} / "
+                f"{_fmt_money(data.get('management_fee_yen'))}"
+            )
+            st.markdown(
+                f"**시키킹/레이킹**  \n{_fmt_deposit_display(data.get('shikikin'))} / "
+                f"{_fmt_deposit_display(data.get('reikin'))}"
+            )
+        with c2:
+            area = data.get("area_sqm")
+            st.markdown(
+                f"**구조/면적**  \n{data.get('layout') or '-'} · "
+                f"{area if area else '-'}㎡"
+            )
+            walk_txt = f"도보{walk}분" if walk else ""
+            st.markdown(f"**가까운역**  \n{station or '-'} {walk_txt}")
+        with c3:
+            sinjuku = _fmt_station_time(station)
+            st.markdown(f"**신주쿠**  \n{sinjuku or '-'}")
+            photo = "입력됨" if manual.get("photo_link") else "미입력"
+            st.markdown(f"**사진링크**  \n{photo}")
 
 
 def _insert_property_number_to_table(html: str, prop_num: str) -> str:
@@ -1864,13 +1956,14 @@ def _render_katok_copy_button(text_content: str, unique_key: str) -> None:
 # 4단계 탭
 # ─────────────────────────────────────────────────
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
     [
         "1️⃣ 도면 업로드",
         "2️⃣ 추출 결과·스타일 선택",
         "3️⃣ 블로그 미리보기",
         "4️⃣ 📚 작업 이력 보관함",
         "5️⃣ 📊 통계",
+        "6️⃣ 🏠 物件DB·제안",
     ]
 )
 
@@ -2660,3 +2753,34 @@ with tab5:
         _render_company_stats()
     with _stats_tab_b:
         _render_staff_stats()
+
+
+# ───── Tab 6: 🏠 物件DB · 제안 리스트 (4-1: 목록 보기) ─────
+with tab6:
+    st.markdown("### 🏠 物件DB · 제안 리스트")
+    st.caption("추출된 매물이 매물번호 최신순으로 모입니다. (검토·수정·선택은 다음 단계에서 추가)")
+
+    if property_db is None or not property_db.is_configured():
+        st.warning(
+            "物件DB(데이터베이스)가 연결되지 않았습니다. "
+            "환경변수 DATABASE_URL을 확인해 주세요."
+        )
+    else:
+        _props = []
+        try:
+            _props = property_db.list_properties(limit=500)
+        except Exception as e:
+            st.error(f"매물 목록을 불러오지 못했습니다: {e}")
+
+        cols_top = st.columns([3, 1])
+        with cols_top[0]:
+            st.caption(f"총 매물 {len(_props)}건 · 매물번호 최신순")
+        with cols_top[1]:
+            if st.button("🔄 새로고침", key="propdb_refresh", use_container_width=True):
+                st.rerun()
+
+        if not _props:
+            st.info("아직 저장된 매물이 없습니다. 도면을 추출하면 여기에 모입니다.")
+        else:
+            for _p in _props:
+                _render_property_card(_p)
