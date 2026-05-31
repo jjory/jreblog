@@ -71,6 +71,18 @@ try:
 except Exception:
     sheet_sync = None
 
+# 항목 한글 매핑(비자·構造·方向·設備) — 없으면 원문 표시로 폴백.
+try:
+    from src import field_map
+except Exception:
+    field_map = None
+
+# 노선·역·지명 한글 번역 — 없으면 원문 표시로 폴백.
+try:
+    from src import translation_db
+except Exception:
+    translation_db = None
+
 # ─────────────────────────────────────────────────
 # 설정 로드 (로컬 .env / 클라우드 Streamlit Secrets)
 # ─────────────────────────────────────────────────
@@ -239,6 +251,198 @@ def _effective_deposit(p: dict, key: str):
     if isinstance(manual.get(key), dict):
         return manual[key]
     return (p.get("data") or {}).get(key)
+
+
+# ──────────────────────────────────────────────────────
+# 전체 칼럼 표 (4단계 전면 개편) — 한글 변환·행정구역·입주일·전체행
+# ──────────────────────────────────────────────────────
+import re as _re_fields
+import urllib.parse as _urlparse
+
+
+def _yn(v) -> str:
+    """bool → 있음/없음/'' (None은 공란)."""
+    if v is True:
+        return "있음"
+    if v is False:
+        return "없음"
+    return ""
+
+
+def _ward_jp_from_address(addr: str) -> str:
+    """주소에서 도도후켄(東京都/○○県 등) 떼고 행정구역부터. (일본어)"""
+    if not addr:
+        return ""
+    return _re_fields.sub(r'^(東京都|北海道|(?:京都|大阪)府|.{2,3}県)', '', addr).strip()
+
+
+def _move_in_no_year(s) -> str:
+    """입주일에서 년도 제거. '2025年4月15日'→'4月15日', '即入居'→그대로."""
+    if not s:
+        return ""
+    return _re_fields.sub(r'^\d{4}\s*[年/\-\.]\s*', '', str(s)).strip()
+
+
+def _line_ko(jp: str) -> str:
+    if not jp:
+        return ""
+    if translation_db is not None:
+        try:
+            return translation_db.translate_line(jp)
+        except Exception:
+            return jp
+    return jp
+
+
+def _station_ko(jp: str) -> str:
+    if not jp:
+        return ""
+    if translation_db is not None:
+        try:
+            return translation_db.translate_station(jp)
+        except Exception:
+            return jp
+    return jp
+
+
+def _ward_ko(addr: str) -> str:
+    if not addr:
+        return ""
+    if translation_db is not None:
+        try:
+            return translation_db.extract_korean_ward(addr)
+        except Exception:
+            return ""
+    return ""
+
+
+def _structure_ko(jp: str) -> str:
+    if field_map is not None:
+        try:
+            return field_map.structure_ko(jp or "")
+        except Exception:
+            return jp or ""
+    return jp or ""
+
+
+def _direction_ko(jp: str) -> str:
+    if field_map is not None:
+        try:
+            return field_map.direction_ko(jp or "")
+        except Exception:
+            return jp or ""
+    return jp or ""
+
+
+def _visa_text(filename: str) -> str:
+    if field_map is not None:
+        try:
+            return field_map.visa_text(filename or "")
+        except Exception:
+            return ""
+    return ""
+
+
+def _deposit_parts(field):
+    """{value,unit} → (값(float), 단위라벨). 없으면 (0.0, '모름')."""
+    if isinstance(field, dict) and field.get("unit"):
+        unit = {"months": "개월분", "yen": "엔"}.get(field.get("unit"), "모름")
+        try:
+            return (float(field.get("value") or 0), unit)
+        except (ValueError, TypeError):
+            return (0.0, "모름")
+    return (0.0, "모름")
+
+
+# 표 칼럼 순서 (캡처 기준) — 편집 가능 칸: 사진링크/시키킹값/시키킹단위/레이킹값/레이킹단위
+_FULL_COLS = [
+    "매물번호", "건물명", "주소", "지역", "맵", "매물검색", "사진링크",
+    "월세", "관리비", "월세+관리비", "시키킹값", "시키킹단위", "레이킹값", "레이킹단위", "방향",
+    "노선1", "가까운역1", "도보1", "노선2", "가까운역2", "도보2", "신주쿠까지",
+    "간취", "면적", "구조", "건물층수", "입주층", "건축연도", "입주일",
+    "인터넷", "엘리베이터", "택배박스", "오토록", "에어컨", "화장실욕실분리",
+    "실내세탁", "독립세면대", "도시가스", "IH", "가스종류", "24시간쓰레기", "펫", "피아노",
+    "비자", "관리회사",
+]
+_EDITABLE_COLS = ["사진링크", "시키킹값", "시키킹단위", "레이킹값", "레이킹단위"]
+
+
+def _property_to_full_row(p: dict) -> dict:
+    """物件DB 매물 1건 → 전체 칼럼 표의 한 행 (한글 변환 적용)."""
+    data = p.get("data") or {}
+    manual = p.get("manual_fields") or {}
+    fac = data.get("facilities") or {}
+    cond = data.get("conditions") or {}
+    ns = data.get("nearest_station") or {}
+    adds = data.get("additional_stations") or []
+    add1 = adds[0] if adds else {}
+
+    bldg = data.get("property_name") or ""
+    addr_jp = _ward_jp_from_address(data.get("address") or "")
+    rent = data.get("rent_yen")
+    mgmt = data.get("management_fee_yen")
+    try:
+        total = (int(rent) + int(mgmt)) if (rent is not None and mgmt is not None) else None
+    except (ValueError, TypeError):
+        total = None
+
+    shiki_v, shiki_u = _deposit_parts(_effective_deposit(p, "shikikin"))
+    reiki_v, reiki_u = _deposit_parts(_effective_deposit(p, "reikin"))
+
+    station_jp = ns.get("station") or ""
+    map_q = _urlparse.quote(f"{bldg} {data.get('address') or ''}".strip())
+    search_q = _urlparse.quote(bldg) if bldg else ""
+
+    gas_jp = fac.get("gas_type") or ""
+    gas_ko = {"都市ガス": "도시가스", "プロパン": "프로판가스", "プロパンガス": "프로판가스"}.get(gas_jp, gas_jp or "")
+
+    return {
+        "매물번호": p.get("property_number") or "",
+        "건물명": bldg,
+        "주소": addr_jp,
+        "지역": _ward_ko(data.get("address") or ""),
+        "맵": f"https://www.google.com/maps/search/{map_q}" if map_q else "",
+        "매물검색": f"https://www.google.com/search?q={search_q}" if search_q else "",
+        "사진링크": manual.get("photo_link") or "",
+        "월세": _fmt_money(rent),
+        "관리비": _fmt_money(mgmt),
+        "월세+관리비": _fmt_money(total),
+        "시키킹값": shiki_v,
+        "시키킹단위": shiki_u,
+        "레이킹값": reiki_v,
+        "레이킹단위": reiki_u,
+        "방향": _direction_ko(data.get("facing_direction") or ""),
+        "노선1": _line_ko(ns.get("line") or ""),
+        "가까운역1": _station_ko(station_jp),
+        "도보1": f"도보{ns.get('walk_minutes')}분" if ns.get("walk_minutes") else "",
+        "노선2": _line_ko(add1.get("line") or ""),
+        "가까운역2": _station_ko(add1.get("station") or ""),
+        "도보2": f"도보{add1.get('walk_minutes')}분" if add1.get("walk_minutes") else "",
+        "신주쿠까지": _fmt_station_time(station_jp) or "",
+        "간취": data.get("layout") or "",
+        "면적": f"{data.get('area_sqm')}㎡" if data.get("area_sqm") else "",
+        "구조": _structure_ko(data.get("structure") or ""),
+        "건물층수": data.get("total_floors") or "",
+        "입주층": data.get("floor") or "",
+        "건축연도": data.get("construction_year") or "",
+        "입주일": _move_in_no_year(data.get("available_from") or ""),
+        "인터넷": ("무료" if fac.get("internet_free") is True else _yn(fac.get("internet_free"))),
+        "엘리베이터": _yn(fac.get("elevator")),
+        "택배박스": _yn(fac.get("delivery_box")),
+        "오토록": _yn(fac.get("auto_lock")),
+        "에어컨": _yn(fac.get("air_conditioner")),
+        "화장실욕실분리": ("분리형" if fac.get("separate_bath_toilet") is True else _yn(fac.get("separate_bath_toilet"))),
+        "실내세탁": ("실내" if fac.get("washing_machine_indoor") is True else _yn(fac.get("washing_machine_indoor"))),
+        "독립세면대": _yn(fac.get("independent_washstand") if "independent_washstand" in fac else fac.get("separate_washstand")),
+        "도시가스": ("도시가스" if gas_jp == "都市ガス" else ""),
+        "IH": _yn(None),  # IH 여부는 스키마에 직접 없음 → 공란(필요시 추후)
+        "가스종류": gas_ko,
+        "24시간쓰레기": "",  # 스키마에 직접 없음 → other_facilities 참고(추후)
+        "펫": _yn(cond.get("pets_ok")),
+        "피아노": _yn(cond.get("instruments_ok")),
+        "비자": _visa_text(p.get("filename") or ""),
+        "관리회사": data.get("management_company") or "",
+    }
 
 
 def _deposit_edit_widget(label: str, current, key: str, col):
@@ -2864,10 +3068,10 @@ with tab5:
         _render_staff_stats()
 
 
-# ───── Tab 6: 🏠 物件DB · 제안 리스트 (4-1: 표 형식 목록) ─────
+# ───── Tab 6: 🏠 物件DB · 제안 리스트 (전체 칼럼·직접편집 표) ─────
 with tab6:
     st.markdown("### 🏠 物件DB · 제안 리스트")
-    st.caption("추출된 매물이 매물번호 최신순으로 모입니다. (검토·수정·선택은 다음 단계에서 추가)")
+    st.caption("전체 칼럼을 한 표에서 보고, 사진링크·시키킹·레이킹은 표에서 직접 편집할 수 있습니다. (좌우로 스크롤)")
 
     if property_db is None or not property_db.is_configured():
         st.warning(
@@ -2875,16 +3079,17 @@ with tab6:
             "환경변수 DATABASE_URL을 확인해 주세요."
         )
     else:
-        # 상단 줄: 새로고침(왼쪽) + 검색칸(오른쪽)
+        import pandas as pd
+
+        # 상단: 새로고침(왼쪽) + 검색(오른쪽)
         _top_l, _top_r = st.columns([1, 3])
         with _top_l:
             if st.button("🔄 새로고침", key="propdb_refresh", use_container_width=True):
                 st.rerun()
         with _top_r:
             _q = st.text_input(
-                "검색",
-                key="propdb_search",
-                placeholder="🔍 건물명·주소·매물번호·역 검색",
+                "검색", key="propdb_search",
+                placeholder="🔍 건물명·주소·매물번호·역·지역 검색",
                 label_visibility="collapsed",
             )
 
@@ -2894,9 +3099,9 @@ with tab6:
         except Exception as e:
             st.error(f"매물 목록을 불러오지 못했습니다: {e}")
 
-        # 검색 필터 (건물명·주소·매물번호·역, 대소문자 무시)
+        # 복합 검색 필터 (건물명·주소·매물번호·역·지역, 공백으로 여러 단어 AND)
         if _q and _q.strip():
-            _ql = _q.strip().lower()
+            _terms = _q.strip().lower().split()
 
             def _match(p):
                 d = p.get("data") or {}
@@ -2906,8 +3111,9 @@ with tab6:
                     str(d.get("property_name") or ""),
                     str(d.get("address") or ""),
                     str(stn),
+                    _ward_ko(d.get("address") or ""),
                 ]).lower()
-                return _ql in hay
+                return all(t in hay for t in _terms)
 
             _props = [p for p in _props if _match(p)]
 
@@ -2919,34 +3125,85 @@ with tab6:
         if not _props:
             st.info("표시할 매물이 없습니다. (검색어를 지우거나 도면을 추출해 보세요)")
         else:
-            import pandas as pd
-
-            _rows = [_property_to_row(_p) for _p in _props]
-            _df = pd.DataFrame(
-                _rows,
-                columns=[
-                    "매물번호", "건물명", "주소", "월세", "관리비",
-                    "시키킹", "레이킹", "구조", "면적",
-                    "가까운역", "도보", "신주쿠", "사진링크",
-                ],
-            )
-            st.dataframe(_df, use_container_width=True, hide_index=True)
-
-            # ── 검토·수정 영역 (4-2) ──
-            st.divider()
-            st.markdown("#### ✏️ 매물 검토·수정")
-            st.caption("매물을 선택해 사진 링크와 시키킹·레이킹을 입력·수정하세요. (저장하면 재추출해도 보존됩니다)")
-
-            _opt_map = {}
+            # 행 구성 + 매물 id 매핑(저장용) + 편집칸 원본값 보관(변경 감지용)
+            _rows, _id_list, _orig_edit = [], [], []
             for _p in _props:
-                _d = _p.get("data") or {}
-                _label = f"{_p.get('property_number') or '?'} · {_d.get('property_name') or '(건물명 없음)'}"
-                _opt_map[_label] = _p
+                _row = _property_to_full_row(_p)
+                _rows.append(_row)
+                _id_list.append(_p.get("id"))
+                _orig_edit.append({k: _row[k] for k in _EDITABLE_COLS})
 
-            _sel = st.selectbox(
-                "수정할 매물 선택",
-                ["(선택하세요)"] + list(_opt_map.keys()),
-                key="propdb_edit_sel",
+            _df = pd.DataFrame(_rows, columns=_FULL_COLS)
+
+            _readonly = [c for c in _FULL_COLS if c not in _EDITABLE_COLS]
+            _colcfg = {
+                "맵": st.column_config.LinkColumn("맵", display_text="집위치보기"),
+                "매물검색": st.column_config.LinkColumn("매물검색", display_text="검색결과"),
+                "사진링크": st.column_config.TextColumn("사진링크✏️", help="중개사이트 매물 링크 붙여넣기"),
+                "시키킹값": st.column_config.NumberColumn("시키킹값✏️", min_value=0.0, step=0.5),
+                "시키킹단위": st.column_config.SelectboxColumn("시키킹단위✏️", options=["개월분", "엔", "모름"]),
+                "레이킹값": st.column_config.NumberColumn("레이킹값✏️", min_value=0.0, step=0.5),
+                "레이킹단위": st.column_config.SelectboxColumn("레이킹단위✏️", options=["개월분", "엔", "모름"]),
+            }
+
+            st.caption("✏️ 표시된 칸(사진링크·시키킹·레이킹)만 편집 가능합니다. 칼럼 머리글을 클릭하면 정렬됩니다.")
+            _edited = st.data_editor(
+                _df,
+                key="propdb_editor",
+                use_container_width=True,
+                hide_index=True,
+                disabled=_readonly,
+                column_config=_colcfg,
+                height=420,
             )
-            if _sel and _sel != "(선택하세요)":
-                _render_property_editor(_opt_map[_sel])
+
+            if st.button("💾 변경사항 저장", key="propdb_save_all", type="primary"):
+                _saved, _failed = 0, 0
+                for _i in range(len(_id_list)):
+                    _rid = _id_list[_i]
+                    _now = {k: _edited.iloc[_i][k] for k in _EDITABLE_COLS}
+                    if _now == _orig_edit[_i]:
+                        continue  # 변경 없는 행은 건너뜀
+                    # 변경된 행 → manual_fields 병합 저장
+                    try:
+                        _cur = property_db.get_property(_rid) or {}
+                        _manual = dict(_cur.get("manual_fields") or {})
+
+                        _photo = str(_now.get("사진링크") or "").strip()
+                        if _photo:
+                            _manual["photo_link"] = _photo
+                        else:
+                            _manual.pop("photo_link", None)
+
+                        def _mk_dep(val, unit_label):
+                            if unit_label == "모름":
+                                return None
+                            try:
+                                v = float(val)
+                            except (ValueError, TypeError):
+                                return None
+                            return {"value": v, "unit": "months" if unit_label == "개월분" else "yen"}
+
+                        _sd = _mk_dep(_now.get("시키킹값"), _now.get("시키킹단위"))
+                        _rd = _mk_dep(_now.get("레이킹값"), _now.get("레이킹단위"))
+                        if _sd is not None:
+                            _manual["shikikin"] = _sd
+                        else:
+                            _manual.pop("shikikin", None)
+                        if _rd is not None:
+                            _manual["reikin"] = _rd
+                        else:
+                            _manual.pop("reikin", None)
+
+                        property_db.update_manual_fields(_rid, _manual)
+                        _saved += 1
+                    except Exception:
+                        _failed += 1
+
+                if _saved:
+                    st.success(f"{_saved}건 저장되었습니다." + (f" ({_failed}건 실패)" if _failed else ""))
+                    st.rerun()
+                elif _failed:
+                    st.error(f"{_failed}건 저장 실패")
+                else:
+                    st.info("변경된 내용이 없습니다.")
