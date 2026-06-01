@@ -353,6 +353,111 @@ def _deposit_months(field) -> float:
     return 0.0
 
 
+# ── 손님용 제안 카드 (5단계) ─────────────────────────────
+_APP_BASE = os.getenv("APP_BASE_URL", "https://jreblog.onrender.com").rstrip("/")
+
+# 손님 카드에 넣을 항목 (건물명·주소·관리회사 제외)
+_CARD_COLS = [
+    "사진링크", "지역", "월세", "관리비", "시키킹", "레이킹", "간취", "면적", "구조",
+    "노선1", "가까운역1", "도보1", "노선2", "가까운역2", "도보2", "신주쿠까지",
+    "입주일", "비자",
+    "인터넷", "엘리베이터", "택배박스", "오토록", "에어컨", "화장실욕실분리",
+    "실내세탁", "독립세면대", "IH", "가스종류", "24시간쓰레기",
+]
+_CARD_FACILITY_COLS = [
+    "인터넷", "엘리베이터", "택배박스", "오토록", "에어컨", "화장실욕실분리",
+    "실내세탁", "독립세면대", "IH", "가스종류", "24시간쓰레기",
+]
+
+
+def _deposit_card_text(months) -> str:
+    """개월분 숫자 → 손님용 표시('없음' / '1.0개월분')."""
+    try:
+        m = float(months)
+    except (ValueError, TypeError):
+        return ""
+    return "없음" if m <= 0 else f"{m:.1f}개월분"
+
+
+def _build_card_from_row(row) -> dict:
+    """표 한 행(편집 반영) → 손님 카드 스냅샷 dict (건물명·주소·관리회사 제외)."""
+    def g(k):
+        try:
+            v = row[k]
+        except Exception:
+            return ""
+        return "" if v is None else v
+    card = {k: g(k) for k in _CARD_COLS}
+    # 시키킹·레이킹은 손님용 문구로 변환해 저장(스냅샷)
+    card["시키킹"] = _deposit_card_text(g("시키킹"))
+    card["레이킹"] = _deposit_card_text(g("레이킹"))
+    return card
+
+
+def _render_customer_proposal(pid: str) -> None:
+    """손님용 제안 카드 페이지 (로그인 불필요). 렌더 후 st.stop()."""
+    rec = None
+    try:
+        rec = property_db.get_proposal(pid) if property_db is not None else None
+    except Exception:
+        rec = None
+
+    if not rec:
+        st.title("🏠 JRE일본부동산")
+        st.error("존재하지 않거나 만료된 제안 링크입니다. 담당자에게 문의해 주세요.")
+        st.stop()
+
+    from datetime import datetime, timezone, timedelta
+    created = rec.get("created_at")
+    if created is not None:
+        try:
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) - created > timedelta(days=90):
+                st.title("🏠 JRE일본부동산")
+                st.warning("이 제안은 작성일 기준 3개월이 지나 만료되었습니다. 담당자에게 최신 정보를 문의해 주세요.")
+                st.stop()
+        except Exception:
+            pass
+
+    cards = rec.get("cards") or []
+    _created_txt = created.strftime("%Y-%m-%d") if created else "-"
+
+    st.title("🏠 JRE일본부동산 — 추천 매물 안내")
+    st.caption(f"아래 정보는 작성일({_created_txt}) 기준입니다. 조건은 변동될 수 있으니 담당자에게 확인해 주세요.")
+    st.divider()
+
+    for _idx, c in enumerate(cards, 1):
+        with st.container(border=True):
+            st.markdown(f"### 추천 매물 {_idx}")
+            _c1, _c2 = st.columns(2)
+            with _c1:
+                st.markdown(f"**지역** · {c.get('지역') or '-'}")
+                st.markdown(f"**월세 / 관리비** · {c.get('월세') or '-'} / {c.get('관리비') or '-'}")
+                st.markdown(f"**시키킹 / 레이킹** · {c.get('시키킹') or '-'} / {c.get('레이킹') or '-'}")
+                st.markdown(f"**구조 / 면적** · {c.get('구조') or '-'} · {c.get('면적') or '-'}")
+                st.markdown(f"**입주 가능** · {c.get('입주일') or '-'}")
+                st.markdown(f"**비자** · {c.get('비자') or '-'}")
+            with _c2:
+                _l1 = " ".join(x for x in [c.get('노선1'), c.get('가까운역1'), c.get('도보1')] if x)
+                _l2 = " ".join(x for x in [c.get('노선2'), c.get('가까운역2'), c.get('도보2')] if x)
+                if _l1:
+                    st.markdown(f"**교통①** · {_l1}")
+                if _l2:
+                    st.markdown(f"**교통②** · {_l2}")
+                if c.get("신주쿠까지"):
+                    st.markdown(f"**신주쿠** · {c.get('신주쿠까지')}")
+                _facs = [f"{k} {c.get(k)}" for k in _CARD_FACILITY_COLS if c.get(k)]
+                if _facs:
+                    st.markdown("**설비** · " + " / ".join(_facs))
+            _photo = c.get("사진링크") or ""
+            if _photo:
+                st.link_button("📷 매물 사진 보기", _photo)
+    st.divider()
+    st.caption("ⓒ JRE일본부동산 · WinBro LLC")
+    st.stop()
+
+
 # 표 칼럼 순서 — 매물번호·입주일·비자를 앞으로, 도시가스 삭제. 전체 편집 가능.
 _FULL_COLS = [
     "매물번호", "입주일", "비자",
@@ -928,6 +1033,13 @@ def _render_login_screen():
             "</div>",
             unsafe_allow_html=True,
         )
+
+
+# ⭐ 손님용 제안 보기 (로그인 불필요) — ?proposal=링크ID 면 카드만 보여주고 멈춤
+_proposal_id = st.query_params.get("proposal", "")
+if _proposal_id:
+    _render_customer_proposal(_proposal_id)
+    st.stop()
 
 
 # 로그인 확인 — 통과 못 하면 여기서 멈춤
@@ -3209,9 +3321,18 @@ with tab6:
                         elif _e:
                             st.error(f"{_e}건 처리 실패")
                 with _b3:
-                    st.button("📝 제안 링크 만들기 (다음 단계)", key="propdb_make",
-                              use_container_width=True, disabled=True,
-                              help="손님용 제안 카드·링크는 5단계에서 연결됩니다.")
+                    if st.button("📝 제안 링크 만들기", key="propdb_make", use_container_width=True,
+                                 disabled=(len(_sel_idx) == 0)):
+                        _cards = [_build_card_from_row(_edited.iloc[i]) for i in _sel_idx]
+                        try:
+                            _pid = property_db.save_proposal(_cards)
+                            if _pid:
+                                st.session_state["_propdb_last_link"] = f"{_APP_BASE}/?proposal={_pid}"
+                            else:
+                                st.session_state["_propdb_last_link"] = ""
+                                st.error("제안 링크 저장에 실패했습니다.")
+                        except Exception as e:
+                            st.error(f"제안 링크 생성 실패: {e}")
 
             if st.button("💾 변경사항 저장", key="propdb_save_all", type="primary"):
                 _saved, _failed = 0, 0
@@ -3291,6 +3412,14 @@ with tab6:
                     st.error(f"{_failed}건 저장 실패")
                 else:
                     st.info("변경된 내용이 없습니다.")
+
+            # 생성된 제안 링크 표시
+            _last_link = st.session_state.get("_propdb_last_link")
+            if _last_link:
+                st.divider()
+                st.success("손님용 제안 링크가 생성되었습니다. 아래 주소를 복사해 손님에게 보내세요.")
+                st.code(_last_link, language=None)
+                st.caption("이 링크는 로그인 없이 열람 가능하며, 작성일 기준 3개월 후 만료됩니다.")
 
             # 선택 매물 모아보기 결과 (제안 리스트 기초 — 핵심 칼럼만). 버튼은 표 위 상단에 있음.
             if st.session_state.get("_propdb_show_selected") and _sel_idx:
