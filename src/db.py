@@ -334,6 +334,62 @@ def save_extracted_batch(items: list) -> tuple:
     return (saved, failed)
 
 
+# ── 손님용 제안 스냅샷 (5단계) ───────────────────────────
+# 제안 링크 1건 = 카드 묶음(스냅샷) + 생성시각. 생성시각으로 3개월 만료 판정.
+_PROP_TABLE = "proposals"
+_CREATE_PROPOSALS_SQL = f"""
+CREATE TABLE IF NOT EXISTS {_PROP_TABLE} (
+    id          TEXT PRIMARY KEY,
+    cards       JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+"""
+
+
+def save_proposal(cards: list) -> Optional[str]:
+    """
+    손님용 제안(카드 묶음 스냅샷) 저장. 짧은 랜덤 id 반환.
+    실패/미설정 시 None.
+    """
+    if not is_configured():
+        return None
+    import secrets
+    pid = secrets.token_urlsafe(8)  # 약 11자 랜덤 (추측 어려움 = 주소 아는 사람만 열람)
+    try:
+        with _connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_CREATE_PROPOSALS_SQL)
+                cur.execute(
+                    f"INSERT INTO {_PROP_TABLE} (id, cards) VALUES (%s, %s)",
+                    (pid, Jsonb(cards or [])),
+                )
+        return pid
+    except Exception:
+        return None
+
+
+def get_proposal(pid: str) -> Optional[dict]:
+    """
+    제안 1건 불러오기. {"id","cards","created_at"} 또는 None.
+    """
+    if not is_configured() or not pid:
+        return None
+    try:
+        with _connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_CREATE_PROPOSALS_SQL)
+                cur.execute(
+                    f"SELECT id, cards, created_at FROM {_PROP_TABLE} WHERE id = %s",
+                    (pid,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return {"id": row[0], "cards": row[1], "created_at": row[2]}
+    except Exception:
+        return None
+
+
 # ── 단독 실행 시 자가 테스트 ─────────────────────────────
 # 로컬/Render Shell 에서  python -m src.db  로 실행하면
 # 연결 → 테이블 생성 → 저장 → 조회 → 삭제 까지 한 번에 점검한다.
