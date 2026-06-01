@@ -358,13 +358,11 @@ _APP_BASE = os.getenv("APP_BASE_URL", "https://jreblog.onrender.com").rstrip("/"
 
 # 손님 카드에 넣을 항목 (건물명·주소·관리회사 제외)
 _CARD_COLS = [
-    "사진링크", "지역", "월세", "관리비", "시키킹", "레이킹", "간취", "면적", "구조",
+    "매물번호", "맵", "사진링크", "지역", "월세", "관리비",
+    "시키킹", "레이킹", "간취", "면적", "구조",
+    "건물층수", "입주층", "건축연도",
     "노선1", "가까운역1", "도보1", "노선2", "가까운역2", "도보2", "신주쿠까지",
     "입주일", "비자",
-    "인터넷", "엘리베이터", "택배박스", "오토록", "에어컨", "화장실욕실분리",
-    "실내세탁", "독립세면대", "IH", "가스종류", "24시간쓰레기",
-]
-_CARD_FACILITY_COLS = [
     "인터넷", "엘리베이터", "택배박스", "오토록", "에어컨", "화장실욕실분리",
     "실내세탁", "독립세면대", "IH", "가스종류", "24시간쓰레기",
 ]
@@ -379,6 +377,57 @@ def _deposit_card_text(months) -> str:
     return "없음" if m <= 0 else f"{m:.1f}개월분"
 
 
+def _money_num(s):
+    """'75,500엔' → 75500 (정수). 실패 시 None."""
+    if s is None:
+        return None
+    digits = "".join(ch for ch in str(s) if ch.isdigit())
+    return int(digits) if digits else None
+
+
+def _card_facilities(c: dict) -> list:
+    """설비 표기 규칙(요청대로) → 손님용 설비 문구 리스트."""
+    out = []
+    # 인터넷: '무료'일 때만
+    if str(c.get("인터넷") or "").strip() in ("무료", "있음"):
+        if str(c.get("인터넷")).strip() == "무료":
+            out.append("🌐 인터넷 무료")
+    # 있음일 때 설비명만
+    _yn_facs = [("엘리베이터", "🛗 엘리베이터"), ("택배박스", "📦 택배박스"),
+                ("오토록", "🔐 오토록"), ("에어컨", "❄️ 에어컨"), ("독립세면대", "🚰 독립세면대")]
+    for key, label in _yn_facs:
+        if str(c.get(key) or "").strip() == "있음":
+            out.append(label)
+    # 화장실/욕실: 분리형/일체형
+    _bt = str(c.get("화장실욕실분리") or "").strip()
+    if _bt == "분리형":
+        out.append("🚿 화장실·욕실 분리형")
+    elif _bt in ("없음", "일체형", "같이"):
+        out.append("🚿 화장실·욕실 일체형")
+    # 세탁기: 실내/실외
+    _wm = str(c.get("실내세탁") or "").strip()
+    if _wm == "실내":
+        out.append("🧺 세탁기 설치 실내")
+    elif _wm in ("실외", "없음"):
+        out.append("🧺 세탁기 설치 실외")
+    # 가스종류: 도시가스/프로판만
+    _gas = str(c.get("가스종류") or "").strip()
+    if "도시" in _gas:
+        out.append("🔥 도시가스")
+    elif "프로판" in _gas:
+        out.append("🔥 프로판")
+    # 24시간 쓰레기
+    if str(c.get("24시간쓰레기") or "").strip() in ("있음", "가능", "O", "o"):
+        out.append("🗑️ 24시간 쓰레기배출")
+    # IH: IH면 인덕션 / 그 외 가스레인지
+    _ih = str(c.get("IH") or "").strip()
+    if _ih == "있음":
+        out.append("🍳 인덕션")
+    elif _ih == "없음":
+        out.append("🍳 가스레인지")
+    return out
+
+
 def _build_card_from_row(row) -> dict:
     """표 한 행(편집 반영) → 손님 카드 스냅샷 dict (건물명·주소·관리회사 제외)."""
     def g(k):
@@ -391,6 +440,11 @@ def _build_card_from_row(row) -> dict:
     # 시키킹·레이킹은 손님용 문구로 변환해 저장(스냅샷)
     card["시키킹"] = _deposit_card_text(g("시키킹"))
     card["레이킹"] = _deposit_card_text(g("레이킹"))
+    # 월세+관리비 합산 (둘 다 숫자일 때만)
+    _r, _m = _money_num(g("월세")), _money_num(g("관리비"))
+    card["합산"] = f"{_r + _m:,}엔" if (_r is not None and _m is not None) else ""
+    # 설비 문구 미리 계산해 저장
+    card["설비목록"] = _card_facilities(card)
     return card
 
 
@@ -424,35 +478,77 @@ def _render_customer_proposal(pid: str) -> None:
     _created_txt = created.strftime("%Y-%m-%d") if created else "-"
 
     st.title("🏠 JRE일본부동산 — 추천 매물 안내")
-    st.caption(f"아래 정보는 작성일({_created_txt}) 기준입니다. 조건은 변동될 수 있으니 담당자에게 확인해 주세요.")
+    st.caption(f"📅 아래 정보는 작성일({_created_txt}) 기준입니다. 조건은 변동될 수 있으니 담당자에게 확인해 주세요.")
     st.divider()
 
     for _idx, c in enumerate(cards, 1):
         with st.container(border=True):
-            st.markdown(f"### 추천 매물 {_idx}")
-            _c1, _c2 = st.columns(2)
-            with _c1:
-                st.markdown(f"**지역** · {c.get('지역') or '-'}")
-                st.markdown(f"**월세 / 관리비** · {c.get('월세') or '-'} / {c.get('관리비') or '-'}")
-                st.markdown(f"**시키킹 / 레이킹** · {c.get('시키킹') or '-'} / {c.get('레이킹') or '-'}")
-                st.markdown(f"**구조 / 면적** · {c.get('구조') or '-'} · {c.get('면적') or '-'}")
-                st.markdown(f"**입주 가능** · {c.get('입주일') or '-'}")
-                st.markdown(f"**비자** · {c.get('비자') or '-'}")
-            with _c2:
-                _l1 = " ".join(x for x in [c.get('노선1'), c.get('가까운역1'), c.get('도보1')] if x)
-                _l2 = " ".join(x for x in [c.get('노선2'), c.get('가까운역2'), c.get('도보2')] if x)
-                if _l1:
-                    st.markdown(f"**교통①** · {_l1}")
-                if _l2:
-                    st.markdown(f"**교통②** · {_l2}")
-                if c.get("신주쿠까지"):
-                    st.markdown(f"**신주쿠** · {c.get('신주쿠까지')}")
-                _facs = [f"{k} {c.get(k)}" for k in _CARD_FACILITY_COLS if c.get(k)]
-                if _facs:
-                    st.markdown("**설비** · " + " / ".join(_facs))
+            _num = c.get("매물번호") or ""
+            st.markdown(f"#### 🏠 추천 매물 {_idx}" + (f"  ·  No. {_num}" if _num else ""))
+
+            # 금액 줄 (월세/관리비 + 합산)
+            _rent = c.get("월세") or "-"
+            _mgmt = c.get("관리비") or "-"
+            _sum = c.get("합산") or ""
+            _money_line = f"💴 **월세 / 관리비** {_rent} / {_mgmt}"
+            if _sum:
+                _money_line += f"  →  **합계 {_sum}**"
+            st.markdown(_money_line)
+
+            # 핵심 정보 (간격 줄여 한 줄에 여러 항목)
+            _line1 = f"📍 {c.get('지역') or '-'}　|　🏢 {c.get('간취') or '-'} · {c.get('면적') or '-'} · {c.get('구조') or '-'}"
+            st.markdown(_line1)
+
+            _floor = ""
+            if c.get("입주층") or c.get("건물층수"):
+                _floor = f"{c.get('입주층') or '?'}층 / {c.get('건물층수') or '?'}층"
+            _bits2 = []
+            if _floor:
+                _bits2.append(f"🪜 {_floor}")
+            if c.get("건축연도"):
+                _bits2.append(f"🏗️ {c.get('건축연도')}년")
+            _bits2.append(f"🔑 시키킹 {c.get('시키킹') or '-'} / 레이킹 {c.get('레이킹') or '-'}")
+            st.markdown("　|　".join(_bits2))
+
+            # 교통
+            _l1 = " ".join(x for x in [c.get('노선1'), c.get('가까운역1'), c.get('도보1')] if x)
+            _l2 = " ".join(x for x in [c.get('노선2'), c.get('가까운역2'), c.get('도보2')] if x)
+            _trans = []
+            if _l1:
+                _trans.append(_l1)
+            if _l2:
+                _trans.append(_l2)
+            if _trans:
+                st.markdown("🚉 " + "　/　".join(_trans))
+            if c.get("신주쿠까지"):
+                st.markdown(f"🗼 {c.get('신주쿠까지')}")
+
+            # 입주·비자
+            _iv = []
+            if c.get("입주일"):
+                _iv.append(f"📆 입주 가능 {c.get('입주일')}")
+            if c.get("비자"):
+                _iv.append(f"🛂 {c.get('비자')}")
+            if _iv:
+                st.markdown("　|　".join(_iv))
+
+            # 설비
+            _facs = c.get("설비목록") or []
+            if _facs:
+                st.markdown("　".join(_facs))
+
+            # 링크 (맵 / 사진)
+            _btns = []
+            _map = c.get("맵") or ""
             _photo = c.get("사진링크") or ""
-            if _photo:
-                st.link_button("📷 매물 사진 보기", _photo)
+            _bcols = st.columns(2)
+            with _bcols[0]:
+                if _map:
+                    st.link_button("🗺️ 지도에서 위치 보기", _map, use_container_width=True)
+            with _bcols[1]:
+                if _photo:
+                    st.link_button("📷 매물 사진 보기", _photo, use_container_width=True)
+
     st.divider()
     st.caption("ⓒ JRE일본부동산 · WinBro LLC")
     st.stop()
@@ -3334,6 +3430,13 @@ with tab6:
                         except Exception as e:
                             st.error(f"제안 링크 생성 실패: {e}")
 
+                # 생성된 제안 링크 — 상단(액션바 안)에 표시
+                _last_link = st.session_state.get("_propdb_last_link")
+                if _last_link:
+                    st.success("✅ 손님용 제안 링크가 생성되었습니다. 아래 주소를 복사해 손님에게 보내세요.")
+                    st.code(_last_link, language=None)
+                    st.caption("🔓 로그인 없이 열람 가능 · 🗓️ 작성일 기준 3개월 후 만료")
+
             if st.button("💾 변경사항 저장", key="propdb_save_all", type="primary"):
                 _saved, _failed = 0, 0
 
@@ -3412,14 +3515,6 @@ with tab6:
                     st.error(f"{_failed}건 저장 실패")
                 else:
                     st.info("변경된 내용이 없습니다.")
-
-            # 생성된 제안 링크 표시
-            _last_link = st.session_state.get("_propdb_last_link")
-            if _last_link:
-                st.divider()
-                st.success("손님용 제안 링크가 생성되었습니다. 아래 주소를 복사해 손님에게 보내세요.")
-                st.code(_last_link, language=None)
-                st.caption("이 링크는 로그인 없이 열람 가능하며, 작성일 기준 3개월 후 만료됩니다.")
 
             # 선택 매물 모아보기 결과 (제안 리스트 기초 — 핵심 칼럼만). 버튼은 표 위 상단에 있음.
             if st.session_state.get("_propdb_show_selected") and _sel_idx:
